@@ -1,0 +1,24 @@
+# Секреты
+.env
+config.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Логи
+*.log
+logs/
+
+# Трекер опубликованных тем и его lock-файл (рантайм-данные конкретного канала)
+posted-topics.json
+posted-topics.lock
+
+# Бэкапы, создаваемые ботом (post_bot.py.backup*, posted-topics.json.bak и т.п.)
+*.bak
+*.backup*
+
+# Прочее
+.claude/
+.DS_Store
