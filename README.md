@@ -16,6 +16,26 @@
 
 ---
 
+## Как это выглядит
+
+Реальные посты в канале. Каждый — результат полного прогона: тема выбрана по контент-плану,
+статья найдена и отскорена, текст переписан голосом эксперта, картинка взята из источника.
+Формат — два отдельных сообщения: сначала `sendPhoto`, затем `sendMessage` с текстом
+(так лимит на текст остаётся полным, 4096 символов, а не 1024 как у подписи к фото).
+
+<div align="center">
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/post-healthy-relationships.jpg" alt="Пост «Что такое здоровые отношения: 5 ключевых признаков» в Telegram-канале"></td>
+<td width="50%"><img src="docs/screenshots/post-money-after-divorce.jpg" alt="Пост «Деньги после развода: за что мы платим на самом деле» в Telegram-канале"></td>
+</tr>
+<tr>
+<td align="center"><sub>Блок 1 · «Основы здоровых отношений»</sub></td>
+<td align="center"><sub>Блок 10 · «Деньги и быт в отношениях»</sub></td>
+</tr>
+</table>
+</div>
+
 ## Что делает
 
 Бот не публикует случайные найденные статьи. Он идёт от контент-плана: сначала выбирает тему,
@@ -138,6 +158,7 @@ run_with_retry.sh      # cron-обёртка: до 3 попыток, успех 
 setup.sh               # venv, зависимости, права на .env/config.json/logs
 requirements.txt       # requests, beautifulsoup4, feedparser, python-dotenv
 sources.json           # список источников (RSS/HTML, селекторы, блэклисты путей)
+docs/screenshots/      # скриншоты опубликованных постов для README
 config.example.json    # шаблон конфига (без секретов)
 .env.example           # шаблон переменных окружения (без секретов)
 test_publishers.py     # smoke-test конфигурации publisher-ов, без живых запросов к API
