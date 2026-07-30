@@ -10,7 +10,6 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-26A5E4?logo=telegram&logoColor=white)
 ![Claude](https://img.shields.io/badge/Powered%20by-Claude-D97757)
-![License](https://img.shields.io/badge/License-MIT-green)
 
 </div>
 
