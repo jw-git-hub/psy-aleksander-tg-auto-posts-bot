@@ -5,8 +5,6 @@
 Автономный контент-бот: 2 раза в день без участия человека парсит статьи по психологии отношений,
 переписывает их голосом эксперта через Claude и публикует в Telegram-канал.
 
-**Канал:** [t.me/domgdeslushat](https://t.me/domgdeslushat)
-
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-26A5E4?logo=telegram&logoColor=white)
 ![Claude](https://img.shields.io/badge/Powered%20by-Claude-D97757)
@@ -237,8 +235,8 @@ DRY_RUN=1 ./venv/bin/python3 post_bot.py
 
 ## English
 
-**What it is.** An autonomous Telegram content bot for a family-psychology channel
-([t.me/domgdeslushat](https://t.me/domgdeslushat)). Runs twice daily via cron, unattended: picks
+**What it is.** An autonomous Telegram content bot for a family-psychology channel.
+Runs twice daily via cron, unattended: picks
 a topic from an 80-topic content plan, gathers a candidate pool from ~31 RSS/HTML sources,
 scores relevance with Claude Haiku, rewrites the chosen article in the expert's voice via
 `claude -p` (Sonnet), validates the result, and publishes to Telegram (`sendPhoto` + separate

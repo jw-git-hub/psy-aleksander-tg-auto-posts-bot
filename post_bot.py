@@ -1276,7 +1276,7 @@ def score_articles_batch(articles: list[dict], topic: str) -> list[int]:
 # Рерайт через Claude CLI
 # ---------------------------------------------------------------------------
 
-REWRITE_PROMPT_TEMPLATE = """Ты — Александр Красногор, семейный психолог. Перепиши статью в формате поста для Telegram-канала.
+REWRITE_PROMPT_TEMPLATE = """Ты — семейный психолог, ведущий Telegram-канал. Перепиши статью в формате поста для Telegram-канала.
 
 ТЕМА ПОСТА: {topic}
 

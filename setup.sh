@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "=== Установка Telegram-бота Александр Красногор ==="
+echo "=== Установка Telegram-бота-автопостера ==="
 
 # Создаём venv если нет
 if [ ! -d "venv" ]; then
