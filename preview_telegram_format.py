@@ -150,7 +150,7 @@ def extract_channels(updates: list[dict]) -> dict[str, str]:
     return channels
 
 
-def find_chat_id(token: str) -> int:
+def find_chat_id(token: str, main_chat_id: int | str | None) -> int:
     try:
         resp = requests.get(f"{API_BASE}{token}/getUpdates", timeout=30)
         data = resp.json()
@@ -167,9 +167,11 @@ def find_chat_id(token: str) -> int:
               "напишите там любое сообщение и запустите снова (Telegram хранит "
               "обновления 24 часа).")
         return 1
+    main_chat_id_str = str(main_chat_id).strip() if main_chat_id is not None else None
     print("Каналы, откуда боту приходили обновления:")
     for chat_id, title in channels.items():
-        print(f"  {chat_id}  {title}")
+        marker = "  ← ОСНОВНОЙ канал, не использовать" if chat_id == main_chat_id_str else ""
+        print(f"  {chat_id}  {title}{marker}")
     print('Впишите id ТЕСТОВОГО канала в config.json: "telegram_test_chat_id": "<id>"')
     return 0
 
@@ -230,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     token = config["telegram_bot_token"]
 
     if args.find_chat_id:
-        return find_chat_id(token)
+        return find_chat_id(token, config.get("telegram_chat_id"))
 
     try:
         chat_id = resolve_test_chat_id(config)

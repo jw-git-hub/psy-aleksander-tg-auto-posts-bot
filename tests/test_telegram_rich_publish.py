@@ -174,6 +174,20 @@ def test_response_without_ok_flag_is_unclear(fake_tg):
     assert fake_tg.methods() == ["sendRichMessage"] * 3
 
 
+def test_unclear_response_body_is_logged(fake_tg, caplog):
+    fake_tg.script(
+        "sendRichMessage",
+        FakeResponse(200, {"description": "странный ответ"}),
+        ok(21),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = rich_publisher().publish(TEXT, None, IMAGE)
+
+    assert "странный ответ" in caplog.text
+    assert result.post_format == "rich"
+
+
 def test_4xx_without_ok_false_is_not_a_refusal(fake_tg):
     fake_tg.script(
         "sendRichMessage",

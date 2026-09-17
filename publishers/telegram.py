@@ -188,7 +188,8 @@ class TelegramPublisher(Publisher):
             if not explicit_refusal:
                 unclear = True
                 logging.warning(
-                    f"Telegram sendRichMessage: ответ без явного отказа (HTTP {resp.status_code}), "
+                    f"Telegram sendRichMessage: ответ без явного отказа "
+                    f"(HTTP {resp.status_code}, {_sanitize_for_logging(data)}), "
                     f"исход неясен (попытка {attempt}/{self.retry_max})"
                 )
                 if attempt < self.retry_max:

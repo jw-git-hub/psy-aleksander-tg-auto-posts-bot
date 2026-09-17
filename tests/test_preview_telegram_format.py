@@ -107,8 +107,22 @@ def test_find_chat_id_prints_channels(monkeypatch, capsys):
     ]}
     monkeypatch.setattr(preview.requests, "get", lambda url, **kwargs: FakeResponse(200, updates))
 
-    assert preview.find_chat_id("123:TEST") == 0
+    assert preview.find_chat_id("123:TEST", None) == 0
     assert "-100777" in capsys.readouterr().out
+
+
+def test_find_chat_id_marks_main_channel(monkeypatch, capsys):
+    updates = {"ok": True, "result": [
+        {"update_id": 1, "channel_post": {"chat": {"id": -100500, "type": "channel", "title": "Основной"}}},
+        {"update_id": 2, "channel_post": {"chat": {"id": -100777, "type": "channel", "title": "Тест"}}},
+    ]}
+    monkeypatch.setattr(preview.requests, "get", lambda url, **kwargs: FakeResponse(200, updates))
+
+    assert preview.find_chat_id("123:TEST", "-100500") == 0
+    out = capsys.readouterr().out
+    lines = {line.split()[0]: line for line in out.splitlines() if line.strip().startswith("-100")}
+    assert "ОСНОВНОЙ" in lines["-100500"]
+    assert "ОСНОВНОЙ" not in lines["-100777"]
 
 
 def test_default_image_is_first_screenshot():
