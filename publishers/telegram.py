@@ -101,6 +101,8 @@ class TelegramPublisher(Publisher):
                 if status == RICH_FAILED:
                     return PublishResult(channel=self.name, ok=False, error=err or "send_rich failed")
                 logging.warning("TG: Telegram отказал в rich-сообщении — отправляем classic")
+        elif self.post_format == "rich" and not image_bytes:
+            logging.info("TG: в посте нет картинки — отправляем classic")
         return self._publish_classic(text, image_bytes)
 
     def _publish_classic(self, text: str, image_bytes: bytes | None) -> PublishResult:
@@ -115,6 +117,7 @@ class TelegramPublisher(Publisher):
 
         ok, msg_id, err = self._send_message(text)
         if ok:
+            logging.info("TG: пост отправлен в формате classic")
             return PublishResult(
                 channel=self.name,
                 ok=True,
@@ -127,9 +130,10 @@ class TelegramPublisher(Publisher):
     def _send_rich(self, rich_message: dict, image_data: bytes) -> tuple[str, int | None, str | None]:
         """Одно rich-сообщение (картинка + абзацы). Возвращает (статус, message_id, ошибка).
 
-        RICH_REJECTED — только если Telegram явно отказал, а все предыдущие
-        попытки закончились однозначно (429): сообщение точно не создано.
-        Сеть, 5xx или ответ не-JSON делают исход неясным — дальше только
+        RICH_REJECTED — только если Telegram явно отказал (`ok: false` и HTTP
+        4xx, кроме 429), а все предыдущие попытки закончились однозначно
+        (429): сообщение точно не создано. Сеть, 5xx, ответ не-JSON или любой
+        другой ответ без явного отказа делают исход неясным — дальше только
         RICH_FAILED.
         """
         api_url = f"https://api.telegram.org/bot{self.bot_token}/sendRichMessage"
@@ -144,6 +148,8 @@ class TelegramPublisher(Publisher):
                     timeout=30,
                 )
                 data = resp.json()
+                if not isinstance(data, dict):
+                    data = {}
             except Exception as e:
                 unclear = True
                 logging.error(
@@ -154,8 +160,9 @@ class TelegramPublisher(Publisher):
                     time.sleep(2)
                 continue
 
-            if data.get("ok"):
-                msg_id = data.get("result", {}).get("message_id")
+            if data.get("ok") is True:
+                result = data.get("result")
+                msg_id = result.get("message_id") if isinstance(result, dict) else None
                 logging.info(
                     f"Rich-сообщение («Статья») отправлено в канал "
                     f"(msg_id={msg_id if msg_id is not None else '?'})"
@@ -163,7 +170,8 @@ class TelegramPublisher(Publisher):
                 return RICH_OK, msg_id if isinstance(msg_id, int) else None, None
 
             if resp.status_code == 429:
-                retry_after = data.get("parameters", {}).get("retry_after", 5)
+                parameters = data.get("parameters")
+                retry_after = parameters.get("retry_after", 5) if isinstance(parameters, dict) else 5
                 if not isinstance(retry_after, (int, float)):
                     retry_after = 5
                 logging.warning(f"Telegram 429: ждём {retry_after}с (попытка {attempt}/{self.retry_max})")
@@ -174,6 +182,17 @@ class TelegramPublisher(Publisher):
                 unclear = True
                 logging.warning(f"Telegram 5xx ({resp.status_code}): ждём 2с (попытка {attempt}/{self.retry_max})")
                 time.sleep(2)
+                continue
+
+            explicit_refusal = data.get("ok") is False and 400 <= resp.status_code < 500
+            if not explicit_refusal:
+                unclear = True
+                logging.warning(
+                    f"Telegram sendRichMessage: ответ без явного отказа (HTTP {resp.status_code}), "
+                    f"исход неясен (попытка {attempt}/{self.retry_max})"
+                )
+                if attempt < self.retry_max:
+                    time.sleep(2)
                 continue
 
             err_desc = str(_sanitize_for_logging(data))

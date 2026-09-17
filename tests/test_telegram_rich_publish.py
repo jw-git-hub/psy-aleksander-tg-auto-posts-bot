@@ -5,7 +5,7 @@ import pytest
 
 from publishers import TelegramPublisher
 from publishers.telegram_rich import build_rich_message
-from tests.tg_fakes import error, not_json, ok, timeout
+from tests.tg_fakes import FakeResponse, error, not_json, ok, timeout
 
 CHAT_ID = "-100500"
 TEXT = "Первый абзац поста.\n\nВторой абзац.\n#отношения"
@@ -143,7 +143,107 @@ def test_5xx_exhausted_fail_without_classic(fake_tg):
     result = rich_publisher().publish(TEXT, None, IMAGE)
 
     assert result.ok is False
+    assert result.error == "rich retries exhausted"
     assert fake_tg.methods() == ["sendRichMessage"] * 3
+
+
+def test_all_429_fail_without_classic(fake_tg):
+    fake_tg.script(
+        "sendRichMessage",
+        error(429, "Too Many Requests: retry after 1", retry_after=1),
+        error(429, "Too Many Requests: retry after 1", retry_after=1),
+        error(429, "Too Many Requests: retry after 1", retry_after=1),
+    )
+
+    result = rich_publisher().publish(TEXT, None, IMAGE)
+
+    assert result.ok is False
+    assert result.error == "rich retries exhausted"
+    assert fake_tg.methods() == ["sendRichMessage"] * 3
+
+
+def test_response_without_ok_flag_is_unclear(fake_tg):
+    fake_tg.script(
+        "sendRichMessage",
+        FakeResponse(200, {}), FakeResponse(200, {}), FakeResponse(200, {}),
+    )
+
+    result = rich_publisher().publish(TEXT, None, IMAGE)
+
+    assert result.ok is False
+    assert fake_tg.methods() == ["sendRichMessage"] * 3
+
+
+def test_4xx_without_ok_false_is_not_a_refusal(fake_tg):
+    fake_tg.script(
+        "sendRichMessage",
+        FakeResponse(400, {"description": "Bad Request"}),
+        ok(21),
+    )
+
+    result = rich_publisher().publish(TEXT, None, IMAGE)
+
+    assert result.ok is True
+    assert result.post_format == "rich"
+    assert fake_tg.methods() == ["sendRichMessage"] * 2
+
+
+def test_non_dict_body_then_refusal_fails_without_classic(fake_tg):
+    fake_tg.script(
+        "sendRichMessage",
+        FakeResponse(200, ["x"]),
+        error(400, "Bad Request: RICH_MESSAGE_INVALID"),
+    )
+
+    result = rich_publisher().publish(TEXT, None, IMAGE)
+
+    assert result.ok is False
+    assert fake_tg.methods() == ["sendRichMessage"] * 2
+
+
+def test_ok_true_with_malformed_result_counts_as_sent(fake_tg):
+    fake_tg.script("sendRichMessage", FakeResponse(200, {"ok": True, "result": None}))
+
+    result = rich_publisher().publish(TEXT, None, IMAGE)
+
+    assert result.ok is True
+    assert result.post_format == "rich"
+    assert result.post_id is None
+    assert fake_tg.methods() == ["sendRichMessage"]
+
+
+def test_429_with_null_parameters_waits_default(fake_tg, sleeps):
+    fake_tg.script(
+        "sendRichMessage",
+        FakeResponse(429, {
+            "ok": False, "error_code": 429,
+            "description": "Too Many Requests", "parameters": None,
+        }),
+        ok(21),
+    )
+
+    result = rich_publisher().publish(TEXT, None, IMAGE)
+
+    assert result.ok is True
+    assert 5 in sleeps
+
+
+def test_rich_without_image_logs_reason(fake_tg, caplog):
+    fake_tg.script("sendMessage", ok(11))
+
+    with caplog.at_level(logging.INFO):
+        rich_publisher().publish(TEXT, None, None)
+
+    assert "нет картинки" in caplog.text
+
+
+def test_classic_success_logs_format(fake_tg, caplog):
+    fake_tg.script("sendMessage", ok(11))
+
+    with caplog.at_level(logging.INFO):
+        TelegramPublisher("t", CHAT_ID).publish(TEXT, None, None)
+
+    assert "формате classic" in caplog.text
 
 
 @pytest.mark.parametrize("unclear", [timeout(), error(502, "Bad Gateway"), not_json()])
