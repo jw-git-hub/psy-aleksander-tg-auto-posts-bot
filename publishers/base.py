@@ -9,6 +9,7 @@ class PublishResult:
     ok: bool
     error: str | None = None
     post_id: str | None = None
+    photo_post_id: str | None = None
 
 
 class Publisher:

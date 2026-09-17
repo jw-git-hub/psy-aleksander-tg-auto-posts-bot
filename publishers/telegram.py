@@ -47,18 +47,24 @@ class TelegramPublisher(Publisher):
     ) -> PublishResult:
         # Если есть bytes картинки — сначала отправляем фото, потом текст.
         # Если фото не отправилось — продолжаем только с текстом (как раньше в main).
+        photo_msg_id = None
         if image_bytes:
-            photo_ok = self._send_photo(image_bytes)
+            photo_ok, photo_msg_id = self._send_photo(image_bytes)
             if not photo_ok:
                 logging.warning("TG: фото не отправлено, продолжаем с текстом")
             time.sleep(1)  # Пауза между фото и текстом
 
         ok, msg_id, err = self._send_message(text)
         if ok:
-            return PublishResult(channel=self.name, ok=True, post_id=str(msg_id) if msg_id else None)
+            return PublishResult(
+                channel=self.name,
+                ok=True,
+                post_id=str(msg_id) if msg_id else None,
+                photo_post_id=str(photo_msg_id) if photo_msg_id else None,
+            )
         return PublishResult(channel=self.name, ok=False, error=err or "send_message failed")
 
-    def _send_photo(self, image_data: bytes) -> bool:
+    def _send_photo(self, image_data: bytes) -> tuple[bool, int | None]:
         api_url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
         for attempt in range(1, self.retry_max + 1):
             try:
@@ -71,9 +77,9 @@ class TelegramPublisher(Publisher):
                 data = resp.json()
 
                 if data.get("ok"):
-                    msg_id = data.get("result", {}).get("message_id", "?")
-                    logging.info(f"Фото отправлено в канал (msg_id={msg_id})")
-                    return True
+                    msg_id = data.get("result", {}).get("message_id")
+                    logging.info(f"Фото отправлено в канал (msg_id={msg_id if msg_id is not None else '?'})")
+                    return True, msg_id if isinstance(msg_id, int) else None
 
                 if resp.status_code == 429:
                     retry_after = data.get("parameters", {}).get("retry_after", 5)
@@ -89,7 +95,7 @@ class TelegramPublisher(Publisher):
                     continue
 
                 logging.error(f"Telegram sendPhoto ошибка: {_sanitize_for_logging(data)}")
-                return False
+                return False, None
 
             except Exception as e:
                 logging.error(
@@ -101,7 +107,7 @@ class TelegramPublisher(Publisher):
                     continue
 
         logging.error(f"Все {self.retry_max} попыток исчерпаны")
-        return False
+        return False, None
 
     def _send_message(self, text: str) -> tuple[bool, int | None, str | None]:
         api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
