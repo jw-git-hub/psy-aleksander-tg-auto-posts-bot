@@ -10,6 +10,7 @@ class PublishResult:
     error: str | None = None
     post_id: str | None = None
     photo_post_id: str | None = None
+    post_format: str | None = None
 
 
 class Publisher:
