@@ -20,8 +20,9 @@
 Формат задаётся переключателем `telegram_post_format` в `config.json`. `classic` — два
 отдельных сообщения: сначала `sendPhoto`, затем `sendMessage` с текстом (так лимит на текст
 остаётся полным, 4096 символов, а не 1024 как у подписи к фото). `rich` — одно расширенное
-сообщение («Статья», `sendRichMessage`): картинка сверху, текст абзацами под ней; если
-Telegram явно отказал, пост уходит в формате `classic`.
+сообщение («Статья», `sendRichMessage`): картинка сверху, текст абзацами под ней. Без
+картинки пост уходит в формате `classic`; если Telegram явно отказал — тоже `classic`, а при
+неясном исходе (сеть, 5xx) повторной отправки другим форматом нет, чтобы не было дубля.
 
 <div align="center">
 <table>
@@ -152,7 +153,7 @@ publishers/
   base.py              # контракт Publisher + PublishResult
   telegram.py          # classic (sendPhoto + sendMessage) или rich (sendRichMessage),
                        #   retry на 429/5xx, HTML→plain fallback, rich→classic при отказе
-  telegram_rich.py     # сборка «Статьи»: блок-картинка + абзац на каждую строку
+  telegram_rich.py     # сборка «Статьи»: блок-картинка + абзац на каждую непустую строку
   facebook.py          # публикация в Facebook Page через Graph API
   instagram.py         # публикация в Instagram Business Account через Graph API
   log_safety.py        # редакция токенов в логах (root-логгер + хендлеры)
