@@ -45,6 +45,7 @@ class FakeTelegram:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
         self._outcomes: dict[str, list] = {}
+        self.unexpected: list[str] = []
 
     def script(self, method: str, *outcomes) -> None:
         self._outcomes.setdefault(method, []).extend(outcomes)
@@ -54,6 +55,7 @@ class FakeTelegram:
         self.calls.append((method, kwargs))
         queue = self._outcomes.get(method)
         if not queue:
+            self.unexpected.append(method)
             raise AssertionError(f"Неожиданный вызов Bot API: {method}")
         outcome = queue.pop(0)
         if isinstance(outcome, BaseException):

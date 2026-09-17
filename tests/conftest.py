@@ -8,7 +8,8 @@ from tests.tg_fakes import FakeTelegram
 def fake_tg(monkeypatch):
     fake = FakeTelegram()
     monkeypatch.setattr(telegram_module.requests, "post", fake.post)
-    return fake
+    yield fake
+    assert not fake.unexpected, f"Неожиданные вызовы Bot API: {fake.unexpected}"
 
 
 @pytest.fixture(autouse=True)
