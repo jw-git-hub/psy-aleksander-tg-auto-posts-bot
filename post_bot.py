@@ -1733,6 +1733,20 @@ def download_image(url: str) -> bytes | None:
 # main
 # ---------------------------------------------------------------------------
 
+def _telegram_record_fields(config: dict, tg_result: PublishResult) -> dict:
+    """Telegram-поля записи posted-topics.json — по ним потом правят пост.
+
+    Rich-пост («Статья») правится через editMessageText с rich_message, а не
+    с text, поэтому формат сохраняется вместе с message_id.
+    """
+    return {
+        "telegram_chat_id": config.get("telegram_chat_id"),
+        "telegram_message_id": int(tg_result.post_id) if tg_result.post_id else None,
+        "telegram_photo_message_id": int(tg_result.photo_post_id) if tg_result.photo_post_id else None,
+        "telegram_post_format": tg_result.post_format,
+    }
+
+
 def _build_publishers(config: dict) -> list:
     """Инстанцирует всех publisher-ов, возвращает только сконфигурированных."""
     graph_v = config.get("graph_api_version", "v21.0")
@@ -1741,6 +1755,7 @@ def _build_publishers(config: dict) -> list:
             bot_token=config.get("telegram_bot_token", ""),
             chat_id=config.get("telegram_chat_id", ""),
             retry_max=config.get("retry_max", 3),
+            post_format=config.get("telegram_post_format", "classic"),
         ),
         FacebookPublisher(
             page_id=config.get("facebook_page_id", ""),
@@ -2444,9 +2459,7 @@ def main():
                 "text_excerpt": text_excerpt_to_save,
                 # Только для новых записей: старые посты публиковались до того,
                 # как TelegramPublisher начал возвращать message_id, — бэкфилить их нечем.
-                "telegram_chat_id": config.get("telegram_chat_id"),
-                "telegram_message_id": int(tg_result.post_id) if tg_result.post_id else None,
-                "telegram_photo_message_id": int(tg_result.photo_post_id) if tg_result.photo_post_id else None,
+                **_telegram_record_fields(config, tg_result),
             })
             try:
                 save_posted(posted)

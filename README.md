@@ -17,8 +17,11 @@
 
 Реальные посты в канале. Каждый — результат полного прогона: тема выбрана по контент-плану,
 статья найдена и отскорена, текст переписан голосом эксперта, картинка взята из источника.
-Формат — два отдельных сообщения: сначала `sendPhoto`, затем `sendMessage` с текстом
-(так лимит на текст остаётся полным, 4096 символов, а не 1024 как у подписи к фото).
+Формат задаётся переключателем `telegram_post_format` в `config.json`. `classic` — два
+отдельных сообщения: сначала `sendPhoto`, затем `sendMessage` с текстом (так лимит на текст
+остаётся полным, 4096 символов, а не 1024 как у подписи к фото). `rich` — одно расширенное
+сообщение («Статья», `sendRichMessage`): картинка сверху, текст абзацами под ней; если
+Telegram явно отказал, пост уходит в формате `classic`.
 
 <div align="center">
 <table>
@@ -44,7 +47,7 @@ flowchart TD
     B --> C["Скоринг релевантности<br/>Claude Haiku, 0–10, порог 7"]
     C --> D["Рерайт статьи<br/>claude -p, голос эксперта"]
     D --> E["Валидация текста<br/>длина, ссылки, хэштеги"]
-    E --> F["Публикация<br/>sendPhoto + отдельный sendMessage"]
+    E --> F["Публикация<br/>sendPhoto + sendMessage<br/>или «Статья» (sendRichMessage)"]
     F --> G["Запись в трекер<br/>posted-topics.json"]
 ```
 
@@ -147,7 +150,9 @@ post_bot.py            # основной пайплайн: выбор темы 
                        #   рерайт → валидация → публикация → трекер
 publishers/
   base.py              # контракт Publisher + PublishResult
-  telegram.py          # sendPhoto + sendMessage, retry на 429/5xx, HTML→plain fallback
+  telegram.py          # classic (sendPhoto + sendMessage) или rich (sendRichMessage),
+                       #   retry на 429/5xx, HTML→plain fallback, rich→classic при отказе
+  telegram_rich.py     # сборка «Статьи»: блок-картинка + абзац на каждую строку
   facebook.py          # публикация в Facebook Page через Graph API
   instagram.py         # публикация в Instagram Business Account через Graph API
   log_safety.py        # редакция токенов в логах (root-логгер + хендлеры)
@@ -159,6 +164,9 @@ docs/screenshots/      # скриншоты опубликованных пос�
 config.example.json    # шаблон конфига (без секретов)
 .env.example           # шаблон переменных окружения (без секретов)
 test_publishers.py     # smoke-test конфигурации publisher-ов, без живых запросов к API
+tests/                 # pytest без сети: поддельный Bot API, отправка classic/rich
+pytest.ini             # настройки pytest
+requirements-dev.txt   # зависимости для тестов (pytest)
 CLAUDE.md              # контент-план (80 тем/10 блоков) и правила для агента
 JOURNAL.md             # инженерный журнал: ключевые решения, найденные и починенные баги
 ```
@@ -178,6 +186,10 @@ chmod 600 .env
 
 # проверка конфигурации без живых запросов к API:
 ./venv/bin/python3 test_publishers.py
+
+# автотесты (без сети, ничего не публикуют):
+./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/python3 -m pytest -q
 
 # прогон без реальной публикации (симулирует, но не шлёт в Telegram/FB/IG):
 DRY_RUN=1 ./venv/bin/python3 post_bot.py
@@ -220,6 +232,7 @@ DRY_RUN=1 ./venv/bin/python3 post_bot.py
 | `instagram_business_account_id` | да | fallback для Instagram |
 | `graph_api_version` | да | версия Graph API, по умолчанию `v21.0` |
 | `retry_max` | да | число попыток `TelegramPublisher` на 429/5xx |
+| `telegram_post_format` | да | формат поста: `classic` (по умолчанию) или `rich` («Статья»); задаётся только здесь, переменной окружения нет |
 | `claude_command`, `max_post_length`, `log_file`, `sources_file`, `posted_topics_file`, `schedule_utc` | нет | зарезервированы в шаблоне конфига; пути и лимиты сейчас фиксированы в коде (`logs/post.log`, `sources.json`, `posted-topics.json`, лимит Telegram 4096 символов) |
 
 ## Безопасность
@@ -240,7 +253,9 @@ Runs twice daily via cron, unattended: picks
 a topic from an 80-topic content plan, gathers a candidate pool from ~31 RSS/HTML sources,
 scores relevance with Claude Haiku, rewrites the chosen article in the expert's voice via
 `claude -p` (Sonnet), validates the result, and publishes to Telegram (`sendPhoto` + separate
-`sendMessage`). Facebook/Instagram publishing (Graph API v21.0) is best-effort and optional.
+`sendMessage`, or a single rich "Article" message via `sendRichMessage` — switchable in
+config, with automatic fallback). Facebook/Instagram publishing (Graph API v21.0) is
+best-effort and optional.
 
 **Stack.** Python 3.10+, `requests`, `beautifulsoup4`, `feedparser`, `python-dotenv`, Claude
 Code CLI, cron. No heavy frameworks.
