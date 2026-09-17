@@ -231,6 +231,8 @@ def load_config() -> dict:
         config["telegram_bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
     if os.getenv("TELEGRAM_CHAT_ID"):
         config["telegram_chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
+    if os.getenv("TELEGRAM_TEST_CHAT_ID"):
+        config["telegram_test_chat_id"] = os.getenv("TELEGRAM_TEST_CHAT_ID")
     if os.getenv("FACEBOOK_PAGE_ID"):
         config["facebook_page_id"] = os.getenv("FACEBOOK_PAGE_ID")
     if os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN"):

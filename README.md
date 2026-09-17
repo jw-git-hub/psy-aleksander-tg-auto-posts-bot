@@ -165,6 +165,7 @@ docs/screenshots/      # скриншоты опубликованных пос�
 config.example.json    # шаблон конфига (без секретов)
 .env.example           # шаблон переменных окружения (без секретов)
 test_publishers.py     # smoke-test конфигурации publisher-ов, без живых запросов к API
+preview_telegram_format.py  # образцы постов classic/rich в ТЕСТОВЫЙ канал
 tests/                 # pytest без сети: поддельный Bot API, отправка classic/rich
 pytest.ini             # настройки pytest
 requirements-dev.txt   # зависимости для тестов (pytest)
@@ -191,6 +192,10 @@ chmod 600 .env
 # автотесты (без сети, ничего не публикуют):
 ./venv/bin/pip install -r requirements-dev.txt
 ./venv/bin/python3 -m pytest -q
+
+# образцы постов в тестовый канал (бот — админ канала, id в telegram_test_chat_id):
+./venv/bin/python3 preview_telegram_format.py --find-chat-id
+./venv/bin/python3 preview_telegram_format.py
 
 # прогон без реальной публикации (симулирует, но не шлёт в Telegram/FB/IG):
 DRY_RUN=1 ./venv/bin/python3 post_bot.py
@@ -220,6 +225,7 @@ DRY_RUN=1 ./venv/bin/python3 post_bot.py
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | да | Токен бота от @BotFather |
 | `TELEGRAM_CHAT_ID` | да | ID или `@username` канала для публикации |
+| `TELEGRAM_TEST_CHAT_ID` | нет | тестовый канал для `preview_telegram_format.py` (не основной) |
 | `FACEBOOK_PAGE_ID` | нет | ID страницы Facebook (Graph API) |
 | `FACEBOOK_PAGE_ACCESS_TOKEN` | нет | Page Access Token (используется и для Instagram) |
 | `INSTAGRAM_BUSINESS_ACCOUNT_ID` | нет | ID Instagram Business Account |
@@ -234,6 +240,7 @@ DRY_RUN=1 ./venv/bin/python3 post_bot.py
 | `graph_api_version` | да | версия Graph API, по умолчанию `v21.0` |
 | `retry_max` | да | число попыток `TelegramPublisher` на 429/5xx |
 | `telegram_post_format` | да | формат поста: `classic` (по умолчанию) или `rich` («Статья»); задаётся только здесь, переменной окружения нет |
+| `telegram_test_chat_id` | да | тестовый канал для `preview_telegram_format.py`; скрипт откажется работать, если это основной канал |
 | `claude_command`, `max_post_length`, `log_file`, `sources_file`, `posted_topics_file`, `schedule_utc` | нет | зарезервированы в шаблоне конфига; пути и лимиты сейчас фиксированы в коде (`logs/post.log`, `sources.json`, `posted-topics.json`, лимит Telegram 4096 символов) |
 
 ## Безопасность

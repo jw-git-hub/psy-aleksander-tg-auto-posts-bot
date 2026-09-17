@@ -138,6 +138,10 @@ Telegram-бот для Telegram-канала по психологии отно�
 # Автотесты (без сети)
 ./venv/bin/python3 -m pytest -q
 
+# Образцы постов classic/rich в ТЕСТОВЫЙ канал (telegram_test_chat_id)
+./venv/bin/python3 preview_telegram_format.py --find-chat-id
+./venv/bin/python3 preview_telegram_format.py
+
 # Установка
 chmod +x setup.sh && ./setup.sh
 
