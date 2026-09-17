@@ -25,7 +25,7 @@ import requests
 
 from post_bot import load_config
 from publishers import PublishResult, TelegramPublisher
-from publishers.log_safety import describe_exception
+from publishers.log_safety import describe_exception, install_filter
 
 BASE_DIR = Path(__file__).resolve().parent
 API_BASE = "https://api.telegram.org/bot"
@@ -222,6 +222,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # install_filter() уже отработал при импорте publishers.telegram, но тогда
+    # хендлера от basicConfig ещё не было — вызываем повторно (идемпотентно),
+    # иначе логи сторонних библиотек (urllib3 и т.п.) уйдут в stderr без маскирования токена.
+    install_filter()
     config = load_config()
     token = config["telegram_bot_token"]
 

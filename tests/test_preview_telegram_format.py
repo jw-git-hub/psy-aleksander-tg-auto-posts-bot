@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -159,3 +160,29 @@ def test_main_refuses_main_channel_without_sending(bot_config, fake_tg, monkeypa
 
     assert preview.main([]) == 2
     assert fake_tg.calls == []
+
+
+def test_main_redacts_token_in_library_logs(bot_config, monkeypatch, capsys, caplog):
+    """Логи сторонних библиотек (urllib3 и т.п.) не должны сливать токен бота.
+
+    urllib3 при проблемах с ответом логирует "Failed to parse headers
+    (url=%s)" с полным URL запроса — токен в нём. install_filter() должен
+    маскировать такие записи, даже если они пришли не через logging нашего
+    кода, а через дочерний логгер (urllib3.connection).
+    """
+    bot_config(telegram_bot_token="123456:AAFakeSecretToken")
+
+    def fake_get(url, **kwargs):
+        logging.getLogger("urllib3.connection").warning(
+            "Failed to parse headers (url=%s): x", url
+        )
+        return FakeResponse(200, {"ok": True, "result": []})
+
+    monkeypatch.setattr(preview.requests, "get", fake_get)
+
+    preview.main(["--find-chat-id"])
+
+    captured = capsys.readouterr()
+    assert "AAFakeSecretToken" not in captured.out
+    assert "AAFakeSecretToken" not in captured.err
+    assert "AAFakeSecretToken" not in caplog.text
