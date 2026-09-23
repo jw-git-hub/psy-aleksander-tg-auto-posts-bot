@@ -15,6 +15,10 @@ logs/
 posted-topics.json
 posted-topics.lock
 
+# Персистентные кэши вызовов Claude Haiku (рантайм-данные, не портфолио)
+topic-keywords-cache.json
+relevance-score-cache.json
+
 # Бэкапы, создаваемые ботом (post_bot.py.backup*, posted-topics.json.bak и т.п.)
 *.bak
 *.backup*

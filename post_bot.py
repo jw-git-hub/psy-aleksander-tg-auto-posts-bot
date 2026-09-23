@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 
@@ -33,6 +33,13 @@ from publishers import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+
+# Персистентные кэши вызовов Claude Haiku (снижают число вызовов без изменения
+# логики отбора — см. topic_keywords_cache / score_cache ниже). Публичный репозиторий:
+# файлы рантайм-данные, в .gitignore.
+TOPIC_KEYWORDS_CACHE_FILE = "topic-keywords-cache.json"
+RELEVANCE_SCORE_CACHE_FILE = "relevance-score-cache.json"
+RELEVANCE_SCORE_CACHE_TTL_DAYS = 30
 
 # ---------------------------------------------------------------------------
 # Тематический план (10 блоков, 80 тем)
@@ -356,6 +363,83 @@ def save_posted(posted: list) -> None:
             _write_atomic()
         finally:
             fcntl.flock(lock_f, fcntl.LOCK_UN)
+
+
+def _load_json_cache(path: Path, empty) -> object:
+    """Общая загрузка JSON-кэша: отсутствующий/пустой файл — пустое значение
+    без предупреждения (легитимный первый запуск), битый JSON или чужой тип
+    корня — пустое значение с warning (не падаем, теряем только кэш)."""
+    if not path.exists() or path.stat().st_size == 0:
+        return empty
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, type(empty)):
+            raise ValueError(f"корневой элемент не {type(empty).__name__}")
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        logging.warning(f"{path.name} повреждён, используем пустой кэш: {e}")
+        return empty
+    return data
+
+
+def _save_json_cache(path: Path, data: object) -> None:
+    """Атомарная запись JSON-кэша (tmp + os.replace), как в save_posted."""
+    tmp_path = path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def load_topic_keywords_cache() -> dict[str, list[str]]:
+    """Персистентный кэш ключевых слов тем (topic-keywords-cache.json).
+    Ключ — текст темы (естественно инвалидируется при правке темы в ALL_TOPICS).
+    Хранятся только успешные ответы Haiku — см. _get_topic_keywords."""
+    return _load_json_cache(BASE_DIR / TOPIC_KEYWORDS_CACHE_FILE, {})
+
+
+def save_topic_keywords_cache(cache: dict[str, list[str]]) -> None:
+    """Атомарная запись topic-keywords-cache.json."""
+    _save_json_cache(BASE_DIR / TOPIC_KEYWORDS_CACHE_FILE, cache)
+
+
+def _parse_cache_date(value) -> date | None:
+    """Парсит ISO-дату (YYYY-MM-DD) из записи кэша, None если не распознана."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _prune_expired_scores(cache: dict) -> dict:
+    """Удаляет записи кэша оценок старше RELEVANCE_SCORE_CACHE_TTL_DAYS,
+    чтобы файл не рос бесконечно. Структура: {norm_url: {topic: {score, date}}}."""
+    cutoff = date.today() - timedelta(days=RELEVANCE_SCORE_CACHE_TTL_DAYS)
+    pruned: dict[str, dict] = {}
+    for norm_url, topics in cache.items():
+        if not isinstance(topics, dict):
+            continue
+        kept = {
+            topic: entry for topic, entry in topics.items()
+            if isinstance(entry, dict) and (_parse_cache_date(entry.get("date")) or date.min) >= cutoff
+        }
+        if kept:
+            pruned[norm_url] = kept
+    return pruned
+
+
+def load_relevance_score_cache() -> dict[str, dict[str, dict]]:
+    """Персистентный кэш оценок релевантности (relevance-score-cache.json).
+    Ключ верхнего уровня — нормализованный URL статьи, второго — текст темы.
+    Просроченные (>RELEVANCE_SCORE_CACHE_TTL_DAYS) записи отбрасываются при загрузке."""
+    raw = _load_json_cache(BASE_DIR / RELEVANCE_SCORE_CACHE_FILE, {})
+    return _prune_expired_scores(raw)
+
+
+def save_relevance_score_cache(cache: dict[str, dict[str, dict]]) -> None:
+    """Атомарная запись relevance-score-cache.json с TTL-очисткой перед записью."""
+    _save_json_cache(BASE_DIR / RELEVANCE_SCORE_CACHE_FILE, _prune_expired_scores(cache))
 
 
 # ---------------------------------------------------------------------------
@@ -1155,11 +1239,26 @@ def _extract_json_object(text: str) -> str | None:
     return text[start:end]
 
 
-def generate_topic_keywords(topic: str) -> list[str]:
+def _topic_keywords_fallback(topic: str) -> list[str]:
+    """Fallback-список keywords без Haiku: простые токены >3 символов из темы."""
+    cleaned = re.sub(r'[^\w\s]', ' ', topic.lower())
+    tokens = [t for t in cleaned.split() if len(t) >= 4]
+    # Дедупликация с сохранением порядка
+    seen = set()
+    out = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _generate_topic_keywords_raw(topic: str) -> tuple[list[str], bool]:
     """Генерирует список ключевых слов для темы через Claude Haiku.
 
-    Возвращает lowercase-список. При ошибке/невалидном ответе — fallback:
-    простые токены >3 символов из названия темы.
+    Возвращает (keywords, is_fallback). is_fallback=True — Haiku не ответил
+    валидно, использован fallback (простые токены темы); такой результат
+    персистентно не кэшируется — см. _get_topic_keywords.
     """
     prompt = (
         f'Для темы "{topic}" дай 12-15 ключевых подстрок для substring-поиска по статьям. '
@@ -1170,38 +1269,26 @@ def generate_topic_keywords(topic: str) -> list[str]:
         f'["отношен","пара","близост","любов","доверие","couple","relationship","intimacy","trust","partner"]'
     )
 
-    def _fallback() -> list[str]:
-        cleaned = re.sub(r'[^\w\s]', ' ', topic.lower())
-        tokens = [t for t in cleaned.split() if len(t) >= 4]
-        # Дедупликация с сохранением порядка
-        seen = set()
-        out = []
-        for t in tokens:
-            if t not in seen:
-                seen.add(t)
-                out.append(t)
-        return out
-
     try:
         result = _run_claude(prompt, "haiku", 90)
         if result.returncode != 0:
             logging.warning(f"generate_topic_keywords: claude CLI код {result.returncode}: {result.stderr[:200]}")
-            return _fallback()
+            return _topic_keywords_fallback(topic), True
 
         answer = result.stdout.strip()
         if not answer:
             logging.warning("generate_topic_keywords: пустой ответ Claude")
-            return _fallback()
+            return _topic_keywords_fallback(topic), True
 
         json_str = _extract_json_array(answer)
         if not json_str:
             logging.warning(f"generate_topic_keywords: не найден JSON-массив в ответе: {answer[:120]}")
-            return _fallback()
+            return _topic_keywords_fallback(topic), True
 
         parsed = json.loads(json_str)
         if not isinstance(parsed, list):
             logging.warning("generate_topic_keywords: ответ не список")
-            return _fallback()
+            return _topic_keywords_fallback(topic), True
 
         keywords = []
         seen = set()
@@ -1214,23 +1301,63 @@ def generate_topic_keywords(topic: str) -> list[str]:
                 keywords.append(kw)
 
         if not keywords:
-            return _fallback()
+            return _topic_keywords_fallback(topic), True
 
         logging.info(f"Keywords для «{topic[:50]}»: {keywords}")
-        return keywords
+        return keywords, False
 
     except subprocess.TimeoutExpired:
         logging.warning("generate_topic_keywords: claude CLI таймаут")
-        return _fallback()
+        return _topic_keywords_fallback(topic), True
     except FileNotFoundError:
         logging.warning("generate_topic_keywords: claude CLI не найден в PATH")
-        return _fallback()
+        return _topic_keywords_fallback(topic), True
     except json.JSONDecodeError as e:
         logging.warning(f"generate_topic_keywords: JSON parse error: {e}")
-        return _fallback()
+        return _topic_keywords_fallback(topic), True
     except Exception as e:
         logging.warning(f"generate_topic_keywords: ошибка: {e}")
-        return _fallback()
+        return _topic_keywords_fallback(topic), True
+
+
+def generate_topic_keywords(topic: str) -> list[str]:
+    """Генерирует список ключевых слов для темы через Claude Haiku (без кэша).
+
+    Возвращает lowercase-список. При ошибке/невалидном ответе — fallback:
+    простые токены >3 символов из названия темы.
+    """
+    keywords, _is_fallback = _generate_topic_keywords_raw(topic)
+    return keywords
+
+
+def _get_topic_keywords(
+    topic: str,
+    run_cache: dict[str, list[str]],
+    persistent_cache: dict[str, list[str]],
+) -> list[str]:
+    """Возвращает keywords для темы, обращаясь к Haiku только если их нет
+    нигде в кэшах.
+
+    Порядок: in-memory кэш текущего прогона → персистентный кэш файла
+    (topic-keywords-cache.json) → вызов Haiku. Персистентно сохраняется
+    только успешный ответ модели (is_fallback=False) — fallback не кэшируем,
+    чтобы в следующий прогон повторить попытку получить нормальные keywords.
+    """
+    if topic in run_cache:
+        return run_cache[topic]
+
+    cached = persistent_cache.get(topic)
+    if cached is not None:
+        logging.info(f"Keywords для «{topic[:50]}»: из персистентного кэша")
+        run_cache[topic] = cached
+        return cached
+
+    keywords, is_fallback = _generate_topic_keywords_raw(topic)
+    run_cache[topic] = keywords
+    if not is_fallback:
+        persistent_cache[topic] = keywords
+        save_topic_keywords_cache(persistent_cache)
+    return keywords
 
 
 def prefilter_by_keywords(articles: list[dict], keywords: list[str]) -> list[dict]:
@@ -1259,23 +1386,15 @@ def prefilter_by_keywords(articles: list[dict], keywords: list[str]) -> list[dic
     return [a for _m, a in scored]
 
 
-def score_articles_batch(articles: list[dict], topic: str) -> list[int]:
-    """Батч-скоринг статей через Claude Haiku (один вызов на BATCH_SIZE).
+def _score_articles_batch_once(articles: list[dict], topic: str) -> list[int] | None:
+    """Один вызов Haiku на батч статей (без разбиения на чанки, без кэша).
 
-    Возвращает список int (по числу статей). При ошибке/несовпадении длины —
-    [0] * len(articles).
+    Возвращает список int (по числу статей) при реальном валидном ответе
+    модели, или None при любом сбое (ошибка CLI/таймаут/невалидный или
+    неполный ответ). None — специально отдельно от [0]*n, чтобы вызывающий
+    код мог отличить настоящий сбой от валидной низкой оценки и не кэшировать
+    сбой как результат (см. score_articles_batch_cached).
     """
-    if not articles:
-        return []
-
-    # Разбиваем на чанки по BATCH_SIZE
-    if len(articles) > BATCH_SIZE:
-        result: list[int] = []
-        for i in range(0, len(articles), BATCH_SIZE):
-            chunk = articles[i:i + BATCH_SIZE]
-            result.extend(score_articles_batch(chunk, topic))
-        return result
-
     n = len(articles)
     lines = []
     for idx, art in enumerate(articles, start=1):
@@ -1299,26 +1418,26 @@ def score_articles_batch(articles: list[dict], topic: str) -> list[int]:
         result = _run_claude(prompt, "haiku", 120)
         if result.returncode != 0:
             logging.warning(f"score_articles_batch: claude CLI код {result.returncode}: {result.stderr[:200]}")
-            return [0] * n
+            return None
 
         answer = result.stdout.strip()
         if not answer:
             logging.warning("score_articles_batch: пустой ответ Claude")
-            return [0] * n
+            return None
 
         json_str = _extract_json_array(answer)
         if not json_str:
             logging.warning(f"score_articles_batch: не найден JSON-массив: {answer[:120]}")
-            return [0] * n
+            return None
 
         parsed = json.loads(json_str)
         if not isinstance(parsed, list):
             logging.warning("score_articles_batch: ответ не список")
-            return [0] * n
+            return None
 
         if len(parsed) != n:
             logging.warning(f"score_articles_batch: ожидалось {n} элементов, получено {len(parsed)}")
-            return [0] * n
+            return None
 
         scores: list[int] = []
         for val in parsed:
@@ -1326,25 +1445,104 @@ def score_articles_batch(articles: list[dict], topic: str) -> list[int]:
                 s = int(val)
             except (TypeError, ValueError):
                 s = 0
-            if s < 0:
-                s = 0
-            if s > 10:
-                s = 10
-            scores.append(s)
+            scores.append(max(0, min(10, s)))
         return scores
 
     except subprocess.TimeoutExpired:
         logging.warning("score_articles_batch: claude CLI таймаут")
-        return [0] * n
+        return None
     except FileNotFoundError:
         logging.warning("score_articles_batch: claude CLI не найден в PATH")
-        return [0] * n
+        return None
     except json.JSONDecodeError as e:
         logging.warning(f"score_articles_batch: JSON parse error: {e}")
-        return [0] * n
+        return None
     except Exception as e:
         logging.warning(f"score_articles_batch: ошибка: {e}")
-        return [0] * n
+        return None
+
+
+def score_articles_batch(articles: list[dict], topic: str) -> list[int]:
+    """Батч-скоринг статей через Claude Haiku (один вызов на BATCH_SIZE, без кэша).
+
+    Возвращает список int (по числу статей). При ошибке/несовпадении длины —
+    [0] * len(articles).
+    """
+    if not articles:
+        return []
+
+    # Разбиваем на чанки по BATCH_SIZE
+    if len(articles) > BATCH_SIZE:
+        result: list[int] = []
+        for i in range(0, len(articles), BATCH_SIZE):
+            chunk = articles[i:i + BATCH_SIZE]
+            result.extend(score_articles_batch(chunk, topic))
+        return result
+
+    scores = _score_articles_batch_once(articles, topic)
+    return scores if scores is not None else [0] * len(articles)
+
+
+def _lookup_cached_score(article: dict, topic: str, score_cache: dict) -> int | None:
+    """Достаёт оценку релевантности из персистентного кэша по (norm_url, тема)."""
+    norm_url = _normalize_url(article.get("url", ""))
+    entry = score_cache.get(norm_url, {}).get(topic)
+    return entry.get("score") if isinstance(entry, dict) else None
+
+
+def _store_cached_score(article: dict, topic: str, score: int, score_cache: dict) -> None:
+    """Сохраняет реальную оценку модели в персистентный кэш с сегодняшней датой."""
+    norm_url = _normalize_url(article.get("url", ""))
+    if not norm_url:
+        return
+    score_cache.setdefault(norm_url, {})[topic] = {
+        "score": score,
+        "date": date.today().isoformat(),
+    }
+
+
+def _score_uncached_chunk(articles: list[dict], topic: str, score_cache: dict) -> list[int]:
+    """Скорит один чанк (≤BATCH_SIZE) новых для кэша статей через Haiku.
+
+    Кэширует и сохраняет на диск только реальный ответ модели — сбой
+    (_score_articles_batch_once вернул None) даёт нули, но в кэш не попадает.
+    """
+    scores = _score_articles_batch_once(articles, topic)
+    if scores is None:
+        return [0] * len(articles)
+    for art, sc in zip(articles, scores):
+        _store_cached_score(art, topic, sc, score_cache)
+    save_relevance_score_cache(score_cache)
+    return scores
+
+
+def score_articles_batch_cached(
+    articles: list[dict], topic: str, score_cache: dict[str, dict[str, dict]]
+) -> list[tuple[int, bool]]:
+    """Батч-скоринг с персистентным кэшем оценок (relevance-score-cache.json).
+
+    Ключ кэша — (нормализованный URL статьи, тема). В Haiku уходят только
+    статьи без кэша, батчами по BATCH_SIZE (порядок и семантика батчей как
+    у score_articles_batch). Возвращает список (score, from_cache) в порядке
+    articles.
+    """
+    results: list[tuple[int, bool]] = [(0, False)] * len(articles)
+    missing_idx: list[int] = []
+    for i, art in enumerate(articles):
+        cached = _lookup_cached_score(art, topic, score_cache)
+        if cached is None:
+            missing_idx.append(i)
+        else:
+            results[i] = (cached, True)
+
+    for start in range(0, len(missing_idx), BATCH_SIZE):
+        chunk_idx = missing_idx[start:start + BATCH_SIZE]
+        chunk_articles = [articles[i] for i in chunk_idx]
+        chunk_scores = _score_uncached_chunk(chunk_articles, topic, score_cache)
+        for pos, i in enumerate(chunk_idx):
+            results[i] = (chunk_scores[pos], False)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1892,23 +2090,23 @@ def _find_best_article_for_topic(topic: str, pool: list[dict],
                                  posted_index: list[dict], stats: dict,
                                  dup_cache: dict[str, tuple[bool, str | None]],
                                  topic_keywords_cache: dict[str, list[str]],
+                                 topic_keywords_persistent_cache: dict[str, list[str]],
+                                 score_cache: dict[str, dict[str, dict]],
                                  counted_urls: set[str]) -> dict | None:
     """Для заданной темы находит в пуле статью со score >= RELEVANCE_THRESHOLD.
 
     Пайплайн:
-      1) Сгенерировать keywords для темы (или взять из кэша).
+      1) Сгенерировать keywords для темы (или взять из in-memory/персистентного кэша).
       2) prefilter_by_keywords — отсечь нерелевантное без LLM.
       3) Отсеять дубли (is_duplicate + dup_cache) и слишком короткие.
-      4) Батч-скоринг первых BATCH_SIZE кандидатов через Haiku.
+      4) Батч-скоринг первых BATCH_SIZE кандидатов через Haiku (с персистентным
+         кэшем оценок — Haiku вызывается только для ещё не оценённых статей).
       5) Выбрать статью со score >= RELEVANCE_THRESHOLD.
       6) Если ни одна не прошла — попробовать следующий батч
          (всего не более MAX_BATCHES_PER_TOPIC).
     """
-    # Шаг 1: keywords (с кэшем)
-    keywords = topic_keywords_cache.get(topic)
-    if keywords is None:
-        keywords = generate_topic_keywords(topic)
-        topic_keywords_cache[topic] = keywords
+    # Шаг 1: keywords (in-memory кэш прогона → персистентный кэш → Haiku)
+    keywords = _get_topic_keywords(topic, topic_keywords_cache, topic_keywords_persistent_cache)
 
     # Шаг 2: пред-фильтр
     filtered = prefilter_by_keywords(pool, keywords)
@@ -1958,18 +2156,19 @@ def _find_best_article_for_topic(topic: str, pool: list[dict],
         if not batch:
             break
 
-        scores = score_articles_batch(batch, topic)
+        scored = score_articles_batch_cached(batch, topic, score_cache)
         stats["scored"] += len(batch)
 
-        # Логируем все скоринги батча
-        for art, sc in zip(batch, scores):
+        # Логируем все скоринги батча (кэш-хиты помечаем отдельно)
+        for art, (sc, from_cache) in zip(batch, scored):
+            cache_note = " (кэш)" if from_cache else ""
             logging.info(
                 f"Релевантность {sc}/10 — «{art.get('title', '?')[:60]}» "
-                f"к теме «{topic[:50]}» (batch {batch_idx + 1})"
+                f"к теме «{topic[:50]}» (batch {batch_idx + 1}){cache_note}"
             )
 
         # Ищем лучшего в батче
-        for art, sc in zip(batch, scores):
+        for art, (sc, _from_cache) in zip(batch, scored):
             if sc >= RELEVANCE_THRESHOLD and sc > best_score:
                 best_article = art
                 best_score = sc
@@ -2296,6 +2495,10 @@ def main():
     dup_cache: dict[str, tuple[bool, str | None]] = {}
     counted_urls: set[str] = set()
     topic_keywords_cache: dict[str, list[str]] = {}
+    # Персистентные кэши Haiku (topic-keywords-cache.json / relevance-score-cache.json):
+    # сокращают число вызовов между прогонами без изменения логики отбора.
+    topic_keywords_persistent_cache = load_topic_keywords_cache()
+    score_cache = load_relevance_score_cache()
 
     pool = _collect_candidate_pool(sources, stats)
     if not pool:
@@ -2327,7 +2530,8 @@ def main():
         article = None
         for _ in range(L4_MAX_REJECTS_PER_TOPIC):
             candidate = _find_best_article_for_topic(
-                topic, pool, posted_index, stats, dup_cache, topic_keywords_cache, counted_urls
+                topic, pool, posted_index, stats, dup_cache, topic_keywords_cache,
+                topic_keywords_persistent_cache, score_cache, counted_urls
             )
             if not candidate:
                 break
