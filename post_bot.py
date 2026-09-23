@@ -41,6 +41,13 @@ TOPIC_KEYWORDS_CACHE_FILE = "topic-keywords-cache.json"
 RELEVANCE_SCORE_CACHE_FILE = "relevance-score-cache.json"
 RELEVANCE_SCORE_CACHE_TTL_DAYS = 30
 
+# Версии формата кэшей — поднять при изменении промпта или модели в
+# _generate_topic_keywords_raw / _score_articles_batch_once: старые записи
+# посчитаны под другой промпт/модель и не должны считаться валидными для
+# нового. При несовпадении версии в файле кэш целиком сбрасывается.
+TOPIC_KEYWORDS_CACHE_VERSION = "haiku-keywords-v1"
+RELEVANCE_SCORE_CACHE_VERSION = "haiku-score-v1"
+
 # ---------------------------------------------------------------------------
 # Тематический план (10 блоков, 80 тем)
 # ---------------------------------------------------------------------------
@@ -383,23 +390,61 @@ def _load_json_cache(path: Path, empty) -> object:
 
 
 def _save_json_cache(path: Path, data: object) -> None:
-    """Атомарная запись JSON-кэша (tmp + os.replace), как в save_posted."""
+    """Атомарная запись JSON-кэша (tmp + os.replace), как в save_posted.
+
+    Сбой записи (диск полон, нет прав, read-only FS и т.п.) — не критическая
+    ошибка: кэш просто не обновится в этот раз, но публикацию поста это
+    блокировать не должно. Логируем warning и чистим недописанный tmp-файл."""
     tmp_path = path.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        logging.warning(f"Не удалось сохранить {path.name}, кэш не обновлён: {e}")
+        tmp_path.unlink(missing_ok=True)
+
+
+def _unwrap_versioned_cache(raw: dict, expected_version: str, file_label: str) -> dict:
+    """Достаёт полезные данные из версионированного кэша {"version", "data"}.
+
+    Несовпадение версии (промпт/модель изменились с прошлого сохранения) или
+    отсутствие/повреждение обёртки — кэш считается пустым (сбрасывается)."""
+    if raw.get("version") != expected_version:
+        if raw:
+            logging.info(
+                f"{file_label}: версия кэша {raw.get('version')!r} не совпадает с "
+                f"текущей {expected_version!r}, сбрасываем кэш"
+            )
+        return {}
+    data = raw.get("data")
+    return data if isinstance(data, dict) else {}
 
 
 def load_topic_keywords_cache() -> dict[str, list[str]]:
     """Персистентный кэш ключевых слов тем (topic-keywords-cache.json).
     Ключ — текст темы (естественно инвалидируется при правке темы в ALL_TOPICS).
     Хранятся только успешные ответы Haiku — см. _get_topic_keywords."""
-    return _load_json_cache(BASE_DIR / TOPIC_KEYWORDS_CACHE_FILE, {})
+    raw = _load_json_cache(BASE_DIR / TOPIC_KEYWORDS_CACHE_FILE, {})
+    return _unwrap_versioned_cache(raw, TOPIC_KEYWORDS_CACHE_VERSION, TOPIC_KEYWORDS_CACHE_FILE)
 
 
 def save_topic_keywords_cache(cache: dict[str, list[str]]) -> None:
-    """Атомарная запись topic-keywords-cache.json."""
-    _save_json_cache(BASE_DIR / TOPIC_KEYWORDS_CACHE_FILE, cache)
+    """Атомарная запись topic-keywords-cache.json с текущей версией формата."""
+    _save_json_cache(
+        BASE_DIR / TOPIC_KEYWORDS_CACHE_FILE,
+        {"version": TOPIC_KEYWORDS_CACHE_VERSION, "data": cache},
+    )
+
+
+def _is_valid_cached_keywords(value) -> bool:
+    """Валидны только непустой список непустых строк — иначе промах кэша
+    (в _get_topic_keywords это ведёт к обычной перегенерации через Haiku)."""
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and all(isinstance(kw, str) and kw for kw in value)
+    )
 
 
 def _parse_cache_date(value) -> date | None:
@@ -434,12 +479,29 @@ def load_relevance_score_cache() -> dict[str, dict[str, dict]]:
     Ключ верхнего уровня — нормализованный URL статьи, второго — текст темы.
     Просроченные (>RELEVANCE_SCORE_CACHE_TTL_DAYS) записи отбрасываются при загрузке."""
     raw = _load_json_cache(BASE_DIR / RELEVANCE_SCORE_CACHE_FILE, {})
-    return _prune_expired_scores(raw)
+    data = _unwrap_versioned_cache(raw, RELEVANCE_SCORE_CACHE_VERSION, RELEVANCE_SCORE_CACHE_FILE)
+    return _prune_expired_scores(data)
 
 
 def save_relevance_score_cache(cache: dict[str, dict[str, dict]]) -> None:
-    """Атомарная запись relevance-score-cache.json с TTL-очисткой перед записью."""
-    _save_json_cache(BASE_DIR / RELEVANCE_SCORE_CACHE_FILE, _prune_expired_scores(cache))
+    """Атомарная запись relevance-score-cache.json (текущая версия формата,
+    TTL-очистка перед записью)."""
+    pruned = _prune_expired_scores(cache)
+    _save_json_cache(
+        BASE_DIR / RELEVANCE_SCORE_CACHE_FILE,
+        {"version": RELEVANCE_SCORE_CACHE_VERSION, "data": pruned},
+    )
+
+
+def _is_valid_cached_score(value) -> bool:
+    """Валидна только запись со score-int (не bool!) в диапазоне 0..10 —
+    иначе промах кэша (см. _lookup_cached_score)."""
+    if not isinstance(value, dict):
+        return False
+    score = value.get("score")
+    if isinstance(score, bool) or not isinstance(score, int):
+        return False
+    return 0 <= score <= 10
 
 
 # ---------------------------------------------------------------------------
@@ -1342,12 +1404,14 @@ def _get_topic_keywords(
     (topic-keywords-cache.json) → вызов Haiku. Персистентно сохраняется
     только успешный ответ модели (is_fallback=False) — fallback не кэшируем,
     чтобы в следующий прогон повторить попытку получить нормальные keywords.
+    Невалидная запись в персистентном кэше (не список непустых строк) —
+    промах, как будто её не было.
     """
     if topic in run_cache:
         return run_cache[topic]
 
     cached = persistent_cache.get(topic)
-    if cached is not None:
+    if _is_valid_cached_keywords(cached):
         logging.info(f"Keywords для «{topic[:50]}»: из персистентного кэша")
         run_cache[topic] = cached
         return cached
@@ -1384,6 +1448,23 @@ def prefilter_by_keywords(articles: list[dict], keywords: list[str]) -> list[dic
     # Сортируем по убыванию числа совпадений (стабильно)
     scored.sort(key=lambda x: x[0], reverse=True)
     return [a for _m, a in scored]
+
+
+def _coerce_score(value) -> int | None:
+    """Приводит один элемент ответа Haiku к int 0..10.
+
+    None — значение не число вовсе (включая bool — JSON true/false не оценка),
+    не приводится к int, или вне диапазона 0..10. Такое значение делает весь
+    ответ батча невалидным (см. _score_articles_batch_once) — лучше провалить
+    батч целиком и не кэшировать, чем молча подставить 0 за реальную оценку.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        score = int(value)
+    except (TypeError, ValueError):
+        return None
+    return score if 0 <= score <= 10 else None
 
 
 def _score_articles_batch_once(articles: list[dict], topic: str) -> list[int] | None:
@@ -1441,11 +1522,11 @@ def _score_articles_batch_once(articles: list[dict], topic: str) -> list[int] | 
 
         scores: list[int] = []
         for val in parsed:
-            try:
-                s = int(val)
-            except (TypeError, ValueError):
-                s = 0
-            scores.append(max(0, min(10, s)))
+            s = _coerce_score(val)
+            if s is None:
+                logging.warning(f"score_articles_batch: невалидный элемент оценки: {val!r}")
+                return None
+            scores.append(s)
         return scores
 
     except subprocess.TimeoutExpired:
@@ -1484,10 +1565,15 @@ def score_articles_batch(articles: list[dict], topic: str) -> list[int]:
 
 
 def _lookup_cached_score(article: dict, topic: str, score_cache: dict) -> int | None:
-    """Достаёт оценку релевантности из персистентного кэша по (norm_url, тема)."""
+    """Достаёт оценку релевантности из персистентного кэша по (norm_url, тема).
+
+    Невалидная запись (score не int, bool или вне 0..10) — промах кэша,
+    как будто её не было (см. _is_valid_cached_score)."""
     norm_url = _normalize_url(article.get("url", ""))
     entry = score_cache.get(norm_url, {}).get(topic)
-    return entry.get("score") if isinstance(entry, dict) else None
+    if not _is_valid_cached_score(entry):
+        return None
+    return entry["score"]
 
 
 def _store_cached_score(article: dict, topic: str, score: int, score_cache: dict) -> None:
@@ -2157,7 +2243,9 @@ def _find_best_article_for_topic(topic: str, pool: list[dict],
             break
 
         scored = score_articles_batch_cached(batch, topic, score_cache)
-        stats["scored"] += len(batch)
+        cache_hits = sum(1 for _sc, from_cache in scored if from_cache)
+        stats["scored"] += len(batch) - cache_hits
+        stats["score_cache_hits"] += cache_hits
 
         # Логируем все скоринги батча (кэш-хиты помечаем отдельно)
         for art, (sc, from_cache) in zip(batch, scored):
@@ -2485,7 +2573,7 @@ def main():
     # Собираем пул кандидатов ОДИН раз для всех попыток
     stats = {"sources_tried": 0, "sources_ok": 0, "articles_found": 0,
              "duplicates": 0, "dup_l1": 0, "dup_l2": 0, "dup_l3": 0, "dup_l4": 0,
-             "l4_calls": 0, "too_short": 0, "scored": 0,
+             "l4_calls": 0, "too_short": 0, "scored": 0, "score_cache_hits": 0,
              "topics_tried": 0, "topics_failed": 0, "text_collisions": 0}
 
     # Предвычисляем индекс posted-записей один раз за прогон (см. task 6:
