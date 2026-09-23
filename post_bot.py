@@ -921,16 +921,137 @@ MAX_LINKS_PER_SOURCE = 10
 # Служебные тексты-заглушки ссылок ("читать далее" и т.п.) — часто на
 # карточке статьи стоит два <a> с одним href (картинка/CTA и заголовок);
 # оба матчатся под selector_title, но только один несёт настоящий заголовок.
+# Сравнение идёт после _normalize_link_text (регистр, кавычки/стрелки/многоточия
+# по краям уже срезаны), поэтому здесь достаточно "голых" вариантов фразы.
 _BOILERPLATE_LINK_TEXTS = {
-    "read more", "readmore", "continue reading", "see more", "more",
-    "подробнее", "читать далее", "читать далее→", "далее", "читать полностью",
+    "read more", "readmore", "read on", "keep reading", "continue reading",
+    "see more", "view more", "learn more", "more", "full story", "full article",
+    "подробнее", "читать далее", "далее", "читать полностью", "читать",
+    "продолжить чтение", "продолжение",
 }
+
+# Декоративная пунктуация по краям текста ссылки (стрелки, кавычки-ёлочки,
+# многоточие, тире) — не несёт смысла, но мешает сравнению с
+# _BOILERPLATE_LINK_TEXTS ("читать далее→" иначе не совпадёт с "читать далее").
+_LINK_TEXT_DECORATION = " \t\n\r.…»«›‹→←›»«*-—–>"
+
+# Ссылки-пагинация листинга (/page/2/, /page/2 и т.п.) — общий паттерн для
+# WordPress и похожих движков, попадают под большинство selector_title вместе
+# со статьями (напр. Attachment Project).
+_PAGINATION_URL_PATTERN = re.compile(r"/page/\d+/?(?:[?#].*)?$", re.IGNORECASE)
+
+
+def _normalize_link_text(text: str) -> str:
+    """Заголовок ссылки без краевой декоративной пунктуации, в нижнем регистре —
+    для сравнения с _BOILERPLATE_LINK_TEXTS и с другими заголовками того же href."""
+    return text.strip().strip(_LINK_TEXT_DECORATION).strip().lower()
 
 
 def _is_boilerplate_link_text(title: str) -> bool:
-    """True, если текст ссылки — служебная заглушка, а не заголовок статьи."""
-    normalized = title.strip().lower()
-    return normalized in _BOILERPLATE_LINK_TEXTS
+    """True, если текст ссылки — служебная заглушка (или пусто после очистки
+    декоративной пунктуации), а не заголовок статьи."""
+    normalized = _normalize_link_text(title)
+    return not normalized or normalized in _BOILERPLATE_LINK_TEXTS
+
+
+# Разделители в <title>/og:title перед суффиксом с названием сайта
+# ("Заголовок статьи | Site Name"). Одиночный дефис — тоже разделитель конца
+# заголовка ("Заголовок - GoodTherapy.org"), но им же пестрят настоящие
+# заголовки, поэтому суффикс после НЕГО режем только если он совпадает
+# с названием источника/доменом (см. _strip_site_name_suffix).
+_TITLE_SITE_SEPARATORS = (" | ", " — ", " – ", " :: ", " » ", " - ")
+
+
+def _strip_site_name_suffix(title: str, source: dict) -> str:
+    """Убирает суффикс вида "Заголовок статьи | Название сайта" из og:title/<title>
+    страницы — они почти всегда собраны так CMS. Режем только если то, что после
+    разделителя, реально похоже на название сайта/домен источника: иначе можно
+    случайно откусить конец настоящего заголовка со своим " - " или " — " внутри
+    (напр. "Secure Attachment - from Childhood to Adult Relationships")."""
+    if not title:
+        return title
+
+    site_name = re.sub(r"\s*\([^)]*\)", "", source.get("name", "")).strip().lower()
+    domain = urlparse(source.get("url", "")).netloc.lower()
+    domain_bare = re.sub(r"^www\.", "", domain).split(".")[0]
+
+    for sep in _TITLE_SITE_SEPARATORS:
+        idx = title.rfind(sep)
+        if idx <= 0:
+            continue
+        suffix = title[idx + len(sep):].strip().lower()
+        if not suffix:
+            continue
+        matches_site = (
+            suffix == site_name
+            or (domain_bare and suffix == domain_bare)
+            or (site_name and (suffix in site_name or site_name in suffix))
+            or (domain_bare and domain_bare in suffix)
+        )
+        if matches_site:
+            return title[:idx].strip()
+
+    return title
+
+
+_QUOTE_NORMALIZE_TABLE = str.maketrans({
+    "“": '"', "”": '"', "„": '"', "«": '"', "»": '"',
+    "‘": "'", "’": "'", "ʼ": "'",
+})
+
+
+def _normalize_quotes(text: str) -> str:
+    """Приводит «ёлочки»/“лапки”/умные кавычки к прямым — для сравнения строк,
+    где один и тот же текст на странице оформлен разными кавычками в h1 и
+    в og:title (частый случай у сайтов на кастомных CMS)."""
+    return text.translate(_QUOTE_NORMALIZE_TABLE)
+
+
+def _is_site_brand_text(text: str, source: dict) -> bool:
+    """True, если text — похоже, название/бренд сайта, а не заголовок статьи.
+    Нужно для страниц с несколькими <h1> (шапка-логотип + настоящий заголовок,
+    встречается, напр., на Drupal-сайтах вроде psyjournal.ru) — первый <h1>
+    тогда не заголовок статьи, а название сайта, и его надо пропустить."""
+    normalized = text.strip().lower()
+    if not normalized:
+        return True
+    site_name = re.sub(r"\s*\([^)]*\)", "", source.get("name", "")).strip().lower()
+    if site_name and (normalized == site_name or site_name in normalized or normalized in site_name):
+        return True
+    domain = urlparse(source.get("url", "")).netloc.lower()
+    domain_bare = re.sub(r"^www\.", "", domain).split(".")[0]
+    if domain_bare and normalized == domain_bare:
+        return True
+    return False
+
+
+def _extract_article_title(art_soup: "BeautifulSoup", source: dict, fallback_title: str) -> str:
+    """Заголовок берём со страницы САМОЙ статьи (og:title → h1 → текст ссылки
+    с листинга), а не с карточки на листинге: там selector_title обычно матчит
+    контейнер целиком (картинка+дата+анонс+CTA), и в заголовок утекает мусор —
+    это ослабляет L2/L3/L4-дедуп и засоряет posted-topics.json."""
+    og_title = ""
+    og = art_soup.find("meta", attrs={"property": "og:title"})
+    if og and og.get("content", "").strip():
+        og_title = og["content"].strip()
+
+    h1_title = ""
+    for h1 in art_soup.find_all("h1"):
+        h1_text = h1.get_text(strip=True)
+        if h1_text and not _is_site_brand_text(h1_text, source):
+            h1_title = h1_text
+            break
+
+    if og_title and h1_title and len(og_title) > len(h1_title) \
+            and _normalize_quotes(og_title).lower().startswith(_normalize_quotes(h1_title).lower()):
+        # og:title = чистый h1 + хвост (категория/бренд сайта — многие CMS,
+        # напр. с Yoast SEO, дописывают его автоматически). h1 надёжнее.
+        title = h1_title
+    else:
+        title = og_title or h1_title or fallback_title
+
+    title = _strip_site_name_suffix(title, source)
+    return title or fallback_title
 
 
 def fetch_articles_html(source: dict) -> list[dict]:
@@ -945,14 +1066,16 @@ def fetch_articles_html(source: dict) -> list[dict]:
     raw_links = soup.select(selector_title)
 
     # Собираем валидные уникальные ссылки-кандидаты (заголовок + URL, без
-    # whitelist/blacklist-мусора и служебных "читать далее"-ссылок), ПЕРЕД
-    # тем как ограничить их числом MAX_LINKS_PER_SOURCE. Если резать список
-    # сразу после select() (как раньше), навигационные/категорийные ссылки,
-    # стоящие в разметке раньше статей, съедают весь лимит и статьи не
-    # доходят до обработки — так листинг с частым слева меню категорий
-    # (напр. Мамсила) отдавал 0 статей при валидном селекторе.
-    seen_hrefs: set[str] = set()
-    candidates: list[tuple[str, str]] = []  # (href, title)
+    # whitelist/blacklist-мусора, пагинации, самой страницы листинга и
+    # служебных "читать далее"-ссылок), ПЕРЕД тем как ограничить их числом
+    # MAX_LINKS_PER_SOURCE. Если резать список сразу после select() (как
+    # раньше), навигационные/категорийные ссылки, стоящие в разметке раньше
+    # статей, съедают весь лимит и статьи не доходят до обработки — так
+    # листинг с частым слева меню категорий (напр. Мамсила) отдавал 0 статей
+    # при валидном селекторе.
+    listing_url_norm = _normalize_url(url)
+    seen_hrefs: dict[str, int] = {}  # normalized href -> индекс в candidates
+    candidates: list[list[str]] = []  # [href, title] — title обновляем на более длинный
     for link_el in raw_links:
         # Определяем заголовок и URL
         if link_el.name == "a":
@@ -982,18 +1105,31 @@ def fetch_articles_html(source: dict) -> list[dict]:
             logging.debug(f"Служебный текст ссылки пропущен: {title!r} ({href})")
             continue
 
-        if href in seen_hrefs:
+        norm_href = _normalize_url(href)
+        if norm_href == listing_url_norm:
+            # Ссылка на саму страницу листинга ("Blog" / "Все статьи" и т.п.)
             continue
-        seen_hrefs.add(href)
-        candidates.append((href, title))
+        if _PAGINATION_URL_PATTERN.search(href):
+            continue
+
+        if norm_href in seen_hrefs:
+            idx = seen_hrefs[norm_href]
+            if len(title) > len(candidates[idx][1]):
+                candidates[idx][1] = title
+            continue
+
+        seen_hrefs[norm_href] = len(candidates)
+        candidates.append([href, title])
         if len(candidates) >= MAX_LINKS_PER_SOURCE:
             break
 
-    for href, title in candidates:
+    for href, listing_title in candidates:
         # Скачиваем саму статью
         try:
             art_html = _safe_download_html(href)
             art_soup = BeautifulSoup(art_html, "html.parser")
+
+            title = _extract_article_title(art_soup, source, listing_title)
 
             # Body
             body = ""

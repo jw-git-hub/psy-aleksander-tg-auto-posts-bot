@@ -102,15 +102,20 @@
     "category": "family"
   },
   {
-    "name": "Materinstvo.ru",
-    "url": "https://materinstvo.ru",
-    "type": "rss",
-    "rss_url": "https://materinstvo.ru/rss.xml",
-    "selector_title": "h1",
+    "name": "НЭН (n-e-n.ru)",
+    "url": "https://n-e-n.ru",
+    "type": "html",
+    "rss_url": null,
+    "selector_title": "a.title",
     "selector_body": ".article-content",
     "selector_image": ".article-content img",
     "language": "ru",
-    "category": "parenting"
+    "category": "parenting",
+    "url_path_blacklist": [
+      "/category/",
+      "/school/",
+      "/tag/"
+    ]
   },
   {
     "name": "Мамсила",
