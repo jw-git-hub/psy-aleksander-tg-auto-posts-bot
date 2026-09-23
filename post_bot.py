@@ -915,6 +915,24 @@ def extract_image_url(article_url: str, article_html: str | None = None) -> str 
     return None
 
 
+# Сколько ссылок на статьи максимум берём с одного листинга (после фильтров).
+MAX_LINKS_PER_SOURCE = 10
+
+# Служебные тексты-заглушки ссылок ("читать далее" и т.п.) — часто на
+# карточке статьи стоит два <a> с одним href (картинка/CTA и заголовок);
+# оба матчатся под selector_title, но только один несёт настоящий заголовок.
+_BOILERPLATE_LINK_TEXTS = {
+    "read more", "readmore", "continue reading", "see more", "more",
+    "подробнее", "читать далее", "читать далее→", "далее", "читать полностью",
+}
+
+
+def _is_boilerplate_link_text(title: str) -> bool:
+    """True, если текст ссылки — служебная заглушка, а не заголовок статьи."""
+    normalized = title.strip().lower()
+    return normalized in _BOILERPLATE_LINK_TEXTS
+
+
 def fetch_articles_html(source: dict) -> list[dict]:
     """Парсинг HTML-страницы через requests + BeautifulSoup"""
     url = source.get("url", "")
@@ -924,9 +942,18 @@ def fetch_articles_html(source: dict) -> list[dict]:
     articles = []
     # Ищем ссылки на статьи через селектор заголовка
     selector_title = source.get("selector_title", "h2 a")
-    links = soup.select(selector_title)[:10]
+    raw_links = soup.select(selector_title)
 
-    for link_el in links:
+    # Собираем валидные уникальные ссылки-кандидаты (заголовок + URL, без
+    # whitelist/blacklist-мусора и служебных "читать далее"-ссылок), ПЕРЕД
+    # тем как ограничить их числом MAX_LINKS_PER_SOURCE. Если резать список
+    # сразу после select() (как раньше), навигационные/категорийные ссылки,
+    # стоящие в разметке раньше статей, съедают весь лимит и статьи не
+    # доходят до обработки — так листинг с частым слева меню категорий
+    # (напр. Мамсила) отдавал 0 статей при валидном селекторе.
+    seen_hrefs: set[str] = set()
+    candidates: list[tuple[str, str]] = []  # (href, title)
+    for link_el in raw_links:
         # Определяем заголовок и URL
         if link_el.name == "a":
             a_tag = link_el
@@ -951,6 +978,18 @@ def fetch_articles_html(source: dict) -> list[dict]:
             logging.debug(f"URL не прошёл whitelist/blacklist: {href}")
             continue
 
+        if _is_boilerplate_link_text(title):
+            logging.debug(f"Служебный текст ссылки пропущен: {title!r} ({href})")
+            continue
+
+        if href in seen_hrefs:
+            continue
+        seen_hrefs.add(href)
+        candidates.append((href, title))
+        if len(candidates) >= MAX_LINKS_PER_SOURCE:
+            break
+
+    for href, title in candidates:
         # Скачиваем саму статью
         try:
             art_html = _safe_download_html(href)

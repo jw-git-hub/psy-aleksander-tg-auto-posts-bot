@@ -44,7 +44,7 @@
 
 ```mermaid
 flowchart TD
-    A["Выбор темы<br/>80 тем / 10 блоков, циклическая ротация"] --> B["Сбор пула статей<br/>31 источник: RSS + HTML-парсинг"]
+    A["Выбор темы<br/>80 тем / 10 блоков, циклическая ротация"] --> B["Сбор пула статей<br/>30 источников: RSS + HTML-парсинг"]
     B --> C["Скоринг релевантности<br/>Claude Haiku, 0–10, порог 7"]
     C --> D["Рерайт статьи<br/>claude -p, голос эксперта"]
     D --> E["Валидация текста<br/>длина, ссылки, хэштеги"]
@@ -258,7 +258,7 @@ DRY_RUN=1 ./venv/bin/python3 post_bot.py
 
 **What it is.** An autonomous Telegram content bot for a family-psychology channel.
 Runs twice daily via cron, unattended: picks
-a topic from an 80-topic content plan, gathers a candidate pool from ~31 RSS/HTML sources,
+a topic from an 80-topic content plan, gathers a candidate pool from ~30 RSS/HTML sources,
 scores relevance with Claude Haiku, rewrites the chosen article in the expert's voice via
 `claude -p` (Sonnet), validates the result, and publishes to Telegram (`sendPhoto` + separate
 `sendMessage`, or a single rich "Article" message via `sendRichMessage` — switchable in
