@@ -19,6 +19,9 @@ posted-topics.lock
 topic-keywords-cache.json
 relevance-score-cache.json
 
+# Состояние ротации неудачных тем (рантайм-данные, не портфолио)
+topic-attempts.json
+
 # Бэкапы, создаваемые ботом (post_bot.py.backup*, posted-topics.json.bak и т.п.)
 *.bak
 *.backup*

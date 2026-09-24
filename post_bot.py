@@ -41,12 +41,17 @@ TOPIC_KEYWORDS_CACHE_FILE = "topic-keywords-cache.json"
 RELEVANCE_SCORE_CACHE_FILE = "relevance-score-cache.json"
 RELEVANCE_SCORE_CACHE_TTL_DAYS = 30
 
+# Персистентное состояние ротации неудачных тем (topic-attempts.json) — см.
+# order_topics_for_attempt. Тоже рантайм-данные, в .gitignore.
+TOPIC_ATTEMPTS_FILE = "topic-attempts.json"
+
 # Версии формата кэшей — поднять при изменении промпта или модели в
 # _generate_topic_keywords_raw / _score_articles_batch_once: старые записи
 # посчитаны под другой промпт/модель и не должны считаться валидными для
 # нового. При несовпадении версии в файле кэш целиком сбрасывается.
 TOPIC_KEYWORDS_CACHE_VERSION = "haiku-keywords-v1"
 RELEVANCE_SCORE_CACHE_VERSION = "haiku-score-v1"
+TOPIC_ATTEMPTS_VERSION = "topic-attempts-v1"
 
 # ---------------------------------------------------------------------------
 # Тематический план (10 блоков, 80 тем)
@@ -1430,6 +1435,74 @@ def compute_current_cycle(posted: list) -> int:
     return max_cycle
 
 
+# ---------------------------------------------------------------------------
+# Ротация неудачных тем (topic-attempts.json)
+#
+# Проблема: узкие темы плана (напр. про развод, роды) стоят в начале списка и
+# на некоторых прогонах подряд не находят статью со score>=7 — они снова
+# оказываются первыми среди unposted[:MAX_TOPIC_ATTEMPTS] и блокируют
+# публикацию. Решение: помнить время последней неудачи по теме и откладывать
+# такие темы в конец очереди, но не бросать совсем — при появлении новой
+# статьи в источниках тема снова может выстрелить.
+#
+# Состояние не завязано на cycle (в отличие от posted-topics.json): неудача
+# означает "в источниках сейчас нет подходящей статьи под эту тему", а не
+# "тема уже опубликована в этом цикле" — при смене цикла причина неудачи
+# никуда не девается, так что запись остаётся в силе и в новом цикле.
+# ---------------------------------------------------------------------------
+
+def load_topic_attempts() -> dict[str, str]:
+    """Персистентное состояние неудачных попыток тем: {тема: ISO-время
+    последней неудачи}. Записи о темах, которых больше нет в ALL_TOPICS
+    (план поменялся), отбрасываются при загрузке."""
+    raw = _load_json_cache(BASE_DIR / TOPIC_ATTEMPTS_FILE, {})
+    data = _unwrap_versioned_cache(raw, TOPIC_ATTEMPTS_VERSION, TOPIC_ATTEMPTS_FILE)
+    all_topics = set(ALL_TOPICS)
+    return {
+        topic: attempted_at for topic, attempted_at in data.items()
+        if topic in all_topics and isinstance(attempted_at, str)
+    }
+
+
+def save_topic_attempts(attempts: dict[str, str]) -> None:
+    """Атомарная запись topic-attempts.json с текущей версией формата."""
+    _save_json_cache(
+        BASE_DIR / TOPIC_ATTEMPTS_FILE,
+        {"version": TOPIC_ATTEMPTS_VERSION, "data": attempts},
+    )
+
+
+def record_topic_failure(attempts: dict[str, str], topic: str, dry_run: bool) -> None:
+    """Отмечает неудачную попытку темы текущим временем и сохраняет на диск.
+
+    В DRY_RUN состояние не пишем: прогон только симулирует публикацию и не
+    должен влиять на порядок тем в будущих боевых прогонах.
+    """
+    attempts[topic] = datetime.now().isoformat()
+    if not dry_run:
+        save_topic_attempts(attempts)
+
+
+def record_topic_success(attempts: dict[str, str], topic: str, dry_run: bool) -> None:
+    """Убирает тему из состояния неудачных попыток после успешной публикации
+    (см. record_topic_failure про DRY_RUN)."""
+    had_record = attempts.pop(topic, None) is not None
+    if had_record and not dry_run:
+        save_topic_attempts(attempts)
+
+
+def order_topics_for_attempt(unposted: list[str], attempts: dict[str, str]) -> list[str]:
+    """Порядок опроса тем в прогоне: сначала темы без неудачных попыток (в
+    порядке тематического плана), затем неудачные — от самой давней неудачи
+    к самой свежей."""
+    fresh = [topic for topic in unposted if topic not in attempts]
+    failed = sorted(
+        (topic for topic in unposted if topic in attempts),
+        key=lambda topic: attempts[topic],
+    )
+    return fresh + failed
+
+
 def _extract_json_array(text: str) -> str | None:
     """Извлекает первый JSON-массив из текста (от первой '[' до парной ']').
 
@@ -2698,11 +2771,16 @@ def _validate_rewritten_post(text: str) -> tuple[bool, str]:
 def main():
     """Главная функция (topic-first, с циклической ротацией):
     1. Вычисляет текущий цикл публикаций.
-    2. Берёт неопубликованные в этом цикле темы из плана.
+    2. Берёт неопубликованные в этом цикле темы из плана и упорядочивает их
+       через order_topics_for_attempt — темы, ранее не нашедшие статью,
+       откладываются в конец (topic-attempts.json), чтобы не блокировать
+       очередь.
     3. Парсит все источники, собирает пул кандидатов.
     4. Для темы ищет в пуле статью со score>=7 через Claude Haiku.
-    5. Если не нашлось — переходит к следующей теме (до MAX_TOPIC_ATTEMPTS).
-    6. Рерайт → L4 text dedup → публикация → обновление posted-topics.json.
+    5. Если не нашлось — переходит к следующей теме (до MAX_TOPIC_ATTEMPTS),
+       отмечая неудачу через record_topic_failure.
+    6. Рерайт → L4 text dedup → публикация → обновление posted-topics.json
+       и снятие темы с ротации через record_topic_success при успехе.
     """
     # Гарантируем единственный работающий экземпляр — до любой другой работы.
     _acquire_singleton_lock()
@@ -2745,6 +2823,11 @@ def main():
         logging.warning("Все темы в текущем цикле опубликованы — нечего публиковать")
         return
 
+    # Ротация неудачных тем (topic-attempts.json) — темы, для которых раньше
+    # не нашлось статьи, откладываются в конец очереди (см. order_topics_for_attempt)
+    topic_attempts = load_topic_attempts()
+    ordered_unposted = order_topics_for_attempt(unposted, topic_attempts)
+
     # Собираем пул кандидатов ОДИН раз для всех попыток
     stats = {"sources_tried": 0, "sources_ok": 0, "articles_found": 0,
              "duplicates": 0, "dup_l1": 0, "dup_l2": 0, "dup_l3": 0, "dup_l4": 0,
@@ -2769,8 +2852,15 @@ def main():
         logging.info(f"Статистика: {stats}")
         return
 
-    # Перебираем темы в порядке плана до MAX_TOPIC_ATTEMPTS
-    topics_to_try = unposted[:MAX_TOPIC_ATTEMPTS]
+    # Перебираем темы в порядке ротации (свежие темы плана, затем неудачные
+    # от самой давней неудачи к самой свежей) до MAX_TOPIC_ATTEMPTS
+    topics_to_try = ordered_unposted[:MAX_TOPIC_ATTEMPTS]
+    deferred_topics = [t for t in unposted if t in topic_attempts]
+    if deferred_topics:
+        logging.info(
+            f"Отложено по ротации (раньше не нашли статью для темы): "
+            f"{len(deferred_topics)} — " + " | ".join(t[:40] for t in deferred_topics[:10])
+        )
     logging.info(f"Будем пробовать темы (до {MAX_TOPIC_ATTEMPTS}): "
                  + " | ".join(t[:40] for t in topics_to_try))
 
@@ -2824,6 +2914,7 @@ def main():
 
         if not article:
             stats["topics_failed"] += 1
+            record_topic_failure(topic_attempts, topic, dry_run)
             logging.info(f"Для темы «{topic}» не найдено статей со score>={RELEVANCE_THRESHOLD}")
             continue
 
@@ -2841,6 +2932,7 @@ def main():
         if not rewritten:
             logging.warning("Рерайт не удался, пробуем следующую тему")
             stats["topics_failed"] += 1
+            record_topic_failure(topic_attempts, topic, dry_run)
             _drop_from_pool(pool, article)
             continue
 
@@ -2858,6 +2950,7 @@ def main():
                     f"(обрезан до 800 симв.): {rewritten[:800]!r}"
                 )
             stats["topics_failed"] += 1
+            record_topic_failure(topic_attempts, topic, dry_run)
             _drop_from_pool(pool, article)
             continue
 
@@ -2870,6 +2963,7 @@ def main():
             )
             stats["text_collisions"] += 1
             stats["topics_failed"] += 1
+            record_topic_failure(topic_attempts, topic, dry_run)
             _drop_from_pool(pool, article)
             continue
 
@@ -2934,6 +3028,7 @@ def main():
                 save_posted(posted)
             except Exception as e:
                 logging.error(f"КРИТИЧНО: пост отправлен, но не сохранён в posted-topics.json: {e}")
+            record_topic_success(topic_attempts, topic, dry_run)
             logging.info(f"Опубликовано: {topic} (цикл {current_cycle})")
             logging.info(f"Статистика: {stats}")
             return  # Один пост за запуск
