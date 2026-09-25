@@ -15,7 +15,7 @@ def test_photo_first_then_paragraph_per_line():
     assert build_rich_message(text) == {
         "blocks": [
             PHOTO_BLOCK,
-            {"type": "paragraph", "text": "Первый абзац."},
+            {"type": "paragraph", "text": {"type": "bold", "text": "Первый абзац."}},
             {"type": "paragraph", "text": "Вторая строка абзаца."},
             {"type": "paragraph", "text": "— пункт один"},
             {"type": "paragraph", "text": "— пункт два"},
@@ -31,15 +31,17 @@ def test_cover_attach_name():
 def test_whitespace_trimmed_and_blank_lines_dropped():
     message = build_rich_message("\n\n   текст с пробелами   \n \t \n")
 
-    assert message["blocks"][1:] == [{"type": "paragraph", "text": "текст с пробелами"}]
+    assert message["blocks"][1:] == [
+        {"type": "paragraph", "text": {"type": "bold", "text": "текст с пробелами"}},
+    ]
 
 
 def test_special_characters_kept_verbatim():
     line = 'a < b && c > d "кавычки" \'апостроф\' <b>не тег</b> &amp;'
 
-    message = build_rich_message(line)
+    message = build_rich_message(f"Заголовок\n{line}")
 
-    assert message["blocks"][1] == {"type": "paragraph", "text": line}
+    assert message["blocks"][2] == {"type": "paragraph", "text": line}
 
 
 def test_empty_text_returns_none():

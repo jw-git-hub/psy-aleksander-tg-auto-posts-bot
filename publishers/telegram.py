@@ -13,6 +13,7 @@ import requests
 
 from .base import Publisher, PublishResult
 from .log_safety import describe_exception, install_filter
+from .post_layout import build_classic_html, build_classic_plain
 from .telegram_rich import RICH_COVER_ATTACH, build_rich_message
 
 # Маскируем токен бота в логах при первом же импорте модуля — независимо от
@@ -258,7 +259,8 @@ class TelegramPublisher(Publisher):
         api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
         # Telegram лимит: 4096 символов
-        text = _truncate_text(text)
+        plain_text = _truncate_text(build_classic_plain(text))
+        text = _truncate_text(build_classic_html(text))
 
         for attempt in range(1, self.retry_max + 1):
             try:
@@ -300,7 +302,7 @@ class TelegramPublisher(Publisher):
                             api_url,
                             json={
                                 "chat_id": self.chat_id,
-                                "text": text,
+                                "text": plain_text,
                                 "disable_web_page_preview": True,
                             },
                             timeout=30,

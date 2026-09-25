@@ -101,7 +101,7 @@ def test_long_text_truncated_before_rich(fake_tg):
     rich_publisher().publish("а" * 5000, None, IMAGE)
 
     blocks = json.loads(fake_tg.kwargs(0)["data"]["rich_message"])["blocks"]
-    assert blocks[1]["text"] == "а" * 4090 + "..."
+    assert blocks[1]["text"]["text"] == "а" * 4090 + "..."
 
 
 @pytest.mark.parametrize("refusal", [

@@ -32,7 +32,7 @@ def test_photo_then_text_two_messages(fake_tg):
     message = fake_tg.kwargs(1)
     assert message["json"] == {
         "chat_id": CHAT_ID,
-        "text": "Текст поста",
+        "text": "<b>Текст поста</b>",
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
@@ -116,6 +116,17 @@ def test_html_parse_error_resends_without_parse_mode(fake_tg):
     assert result.ok is True
     assert result.post_id == "12"
     assert "parse_mode" not in fake_tg.kwargs(1)["json"]
+    assert fake_tg.kwargs(1)["json"]["text"] == "a < b"
+
+
+def test_bold_title_and_blank_line_between_paragraphs(fake_tg):
+    fake_tg.script("sendMessage", ok(11))
+
+    make_publisher().publish("ЗАГОЛОВОК\n\nПервый абзац <тут>.\nВторой абзац.\n\n#теги", None, None)
+
+    assert fake_tg.kwargs(0)["json"]["text"] == (
+        "<b>ЗАГОЛОВОК</b>\n\nПервый абзац &lt;тут&gt;.\n\nВторой абзац.\n\n#теги"
+    )
 
 
 def test_long_text_truncated_to_4093(fake_tg):
