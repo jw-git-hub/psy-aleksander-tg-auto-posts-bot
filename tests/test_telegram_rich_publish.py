@@ -74,25 +74,20 @@ def test_rich_payload_keeps_cyrillic_readable(fake_tg):
     assert "Первый абзац" in fake_tg.kwargs(0)["data"]["rich_message"]
 
 
-def test_rich_without_image_goes_classic(fake_tg):
-    fake_tg.script("sendMessage", ok(11))
-
+def test_rich_without_image_fails_without_sending(fake_tg):
     result = rich_publisher().publish(TEXT, None, None)
 
-    assert result.ok is True
-    assert result.post_format == "classic"
-    assert fake_tg.methods() == ["sendMessage"]
+    assert result.ok is False
+    assert fake_tg.methods() == []
 
 
-def test_rich_too_many_blocks_goes_classic_without_rich_request(fake_tg):
-    fake_tg.script("sendPhoto", ok(10))
-    fake_tg.script("sendMessage", ok(11))
+def test_rich_too_many_blocks_fails_without_sending(fake_tg):
     text = "\n".join("с" for _ in range(600))  # 600 строк, 1199 символов
 
     result = rich_publisher().publish(text, None, IMAGE)
 
-    assert result.post_format == "classic"
-    assert fake_tg.methods() == ["sendPhoto", "sendMessage"]
+    assert result.ok is False
+    assert fake_tg.methods() == []
 
 
 def test_long_text_truncated_before_rich(fake_tg):
@@ -108,20 +103,30 @@ def test_long_text_truncated_before_rich(fake_tg):
     error(400, "Bad Request: RICH_MESSAGE_INVALID"),
     error(403, "Forbidden: not enough rights to send photos to the chat"),
 ])
-def test_explicit_refusal_falls_back_to_classic(fake_tg, caplog, refusal):
-    fake_tg.script("sendRichMessage", refusal)
-    fake_tg.script("sendPhoto", ok(10))
-    fake_tg.script("sendMessage", ok(11))
+def test_explicit_refusal_retries_rich_without_bold_title(fake_tg, caplog, refusal):
+    fake_tg.script("sendRichMessage", refusal, ok(21))
 
     with caplog.at_level(logging.WARNING):
         result = rich_publisher().publish(TEXT, None, IMAGE)
 
     assert result.ok is True
-    assert result.post_format == "classic"
-    assert result.post_id == "11"
-    assert result.photo_post_id == "10"
-    assert fake_tg.methods() == ["sendRichMessage", "sendPhoto", "sendMessage"]
+    assert result.post_format == "rich"
+    assert result.post_id == "21"
+    assert fake_tg.methods() == ["sendRichMessage", "sendRichMessage"]
+    retry_blocks = json.loads(fake_tg.kwargs(1)["data"]["rich_message"])["blocks"]
+    assert retry_blocks[1] == {"type": "paragraph", "text": "Первый абзац поста."}
     assert refusal.json()["description"] in caplog.text
+
+
+def test_refusal_of_both_rich_variants_fails_without_classic(fake_tg):
+    refusal = error(400, "Bad Request: RICH_MESSAGE_INVALID")
+    fake_tg.script("sendRichMessage", refusal, refusal)
+
+    result = rich_publisher().publish(TEXT, None, IMAGE)
+
+    assert result.ok is False
+    assert "RICH_MESSAGE_INVALID" in result.error
+    assert fake_tg.methods() == ["sendRichMessage", "sendRichMessage"]
 
 
 def test_timeouts_exhausted_fail_without_classic(fake_tg):
@@ -243,8 +248,6 @@ def test_429_with_null_parameters_waits_default(fake_tg, sleeps):
 
 
 def test_rich_without_image_logs_reason(fake_tg, caplog):
-    fake_tg.script("sendMessage", ok(11))
-
     with caplog.at_level(logging.INFO):
         rich_publisher().publish(TEXT, None, None)
 
@@ -272,24 +275,21 @@ def test_refusal_after_unclear_attempt_fails_without_classic(fake_tg, unclear):
     assert fake_tg.methods() == ["sendRichMessage", "sendRichMessage"]
 
 
-def test_429_then_refusal_still_falls_back(fake_tg, sleeps):
-    # 429 — однозначный отказ: сообщение не создано, classic безопасен.
+def test_429_then_refusal_still_retries_without_bold(fake_tg, sleeps):
+    # 429 — однозначный отказ: сообщение не создано, повтор безопасен.
     fake_tg.script(
         "sendRichMessage",
         error(429, "Too Many Requests: retry after 3", retry_after=3),
         error(400, "Bad Request: RICH_MESSAGE_INVALID"),
+        ok(21),
     )
-    fake_tg.script("sendPhoto", ok(10))
-    fake_tg.script("sendMessage", ok(11))
 
     result = rich_publisher().publish(TEXT, None, IMAGE)
 
     assert result.ok is True
-    assert result.post_format == "classic"
+    assert result.post_format == "rich"
     assert 3 in sleeps
-    assert fake_tg.methods() == [
-        "sendRichMessage", "sendRichMessage", "sendPhoto", "sendMessage",
-    ]
+    assert fake_tg.methods() == ["sendRichMessage"] * 3
 
 
 def test_429_then_success(fake_tg, sleeps):

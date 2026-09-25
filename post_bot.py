@@ -2289,7 +2289,7 @@ def _build_publishers(config: dict) -> list:
             bot_token=config.get("telegram_bot_token", ""),
             chat_id=config.get("telegram_chat_id", ""),
             retry_max=config.get("retry_max", 3),
-            post_format=config.get("telegram_post_format", "classic"),
+            post_format=config.get("telegram_post_format", "rich"),
         ),
         FacebookPublisher(
             page_id=config.get("facebook_page_id", ""),
@@ -2359,6 +2359,15 @@ def _collect_candidate_pool(sources: list, stats: dict) -> list[dict]:
         logging.info(f"Pool capped: {before} → {len(pool)} articles")
 
     return pool
+
+
+def _drop_articles_without_image(pool: list[dict]) -> list[dict]:
+    """Оставляет только статьи с картинкой: без неё пост не публикуется."""
+    with_image = [article for article in pool if article.get("image_url")]
+    dropped_count = len(pool) - len(with_image)
+    if dropped_count:
+        logging.info(f"Без картинки, убраны из пула: {dropped_count} статей")
+    return with_image
 
 
 def _drop_from_pool(pool: list[dict], article: dict) -> None:
@@ -2846,7 +2855,7 @@ def main():
     topic_keywords_persistent_cache = load_topic_keywords_cache()
     score_cache = load_relevance_score_cache()
 
-    pool = _collect_candidate_pool(sources, stats)
+    pool = _drop_articles_without_image(_collect_candidate_pool(sources, stats))
     if not pool:
         logging.warning("Пул кандидатов пуст — не из чего выбирать")
         logging.info(f"Статистика: {stats}")
@@ -2881,6 +2890,7 @@ def main():
         # темы (вердикт L4 зависит только от заголовка статьи, поэтому переход
         # к следующей теме без удаления из пула вернул бы ту же статью снова).
         article = None
+        image_bytes = None
         for _ in range(L4_MAX_REJECTS_PER_TOPIC):
             candidate = _find_best_article_for_topic(
                 topic, pool, posted_index, stats, dup_cache, topic_keywords_cache,
@@ -2890,6 +2900,17 @@ def main():
                 break
 
             logging.info(f"Выбрана статья «{candidate['title'][:60]}» для темы «{topic}»")
+
+            # Пост выходит только с картинкой — скачиваем её до рерайта,
+            # чтобы не тратить Claude на статью, которую нельзя опубликовать.
+            image_bytes = download_image(candidate["image_url"])
+            if not image_bytes:
+                logging.info(
+                    f"Картинка статьи «{candidate['title'][:60]}» не скачалась, "
+                    "берём следующего кандидата"
+                )
+                _drop_from_pool(pool, candidate)
+                continue
 
             if stats["l4_calls"] >= L4_MAX_CALLS_PER_RUN:
                 logging.warning(
@@ -2974,8 +2995,7 @@ def main():
         text_excerpt_to_save = rewritten[:TEXT_EXCERPT_LEN]
 
         # Публикация
-        image_url = article.get("image_url") or None
-        image_bytes = download_image(image_url) if image_url else None
+        image_url = article["image_url"]
 
         if dry_run:
             logging.info(

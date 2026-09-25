@@ -1,8 +1,7 @@
 """TelegramPublisher: classic (sendPhoto + sendMessage) или rich (sendRichMessage).
 
-429/5xx retry, HTML fallback для classic. Rich при явном отказе Telegram
-откатывается на classic; при неясном исходе (сеть, 5xx) — нет, чтобы не
-получить дубль.
+429/5xx retry, HTML fallback для classic. Rich строгий: без картинки или при
+отказе Telegram пост не публикуется, classic вместо «Статьи» не шлём.
 """
 
 import json
@@ -25,9 +24,9 @@ POST_FORMATS = ("classic", "rich")
 
 # Итоги попытки отправить rich-сообщение.
 RICH_OK = "ok"
-# Telegram явно отказал: сообщение точно не создано — можно слать classic.
+# Telegram явно отказал: сообщение точно не создано — можно повторить иначе.
 RICH_REJECTED = "rejected"
-# Исход неясен (сеть/5xx) или попытки исчерпаны — classic слать нельзя:
+# Исход неясен (сеть/5xx) или попытки исчерпаны — повторять нельзя:
 # при потерянном ответе в канале оказался бы дубль.
 RICH_FAILED = "failed"
 
@@ -84,27 +83,42 @@ class TelegramPublisher(Publisher):
         image_url: str | None,
         image_bytes: bytes | None,
     ) -> PublishResult:
-        # Rich имеет смысл только с картинкой: без неё объединять нечего,
-        # а classic-путь проверен.
-        if self.post_format == "rich" and image_bytes:
-            rich_message = build_rich_message(_truncate_text(text))
-            if rich_message is None:
-                logging.warning("TG: текст не укладывается в rich-сообщение — отправляем classic")
-            else:
-                status, msg_id, err = self._send_rich(rich_message, image_bytes)
-                if status == RICH_OK:
-                    return PublishResult(
-                        channel=self.name,
-                        ok=True,
-                        post_id=str(msg_id) if msg_id else None,
-                        post_format="rich",
-                    )
-                if status == RICH_FAILED:
-                    return PublishResult(channel=self.name, ok=False, error=err or "send_rich failed")
-                logging.warning("TG: Telegram отказал в rich-сообщении — отправляем classic")
-        elif self.post_format == "rich" and not image_bytes:
-            logging.info("TG: в посте нет картинки — отправляем classic")
+        if self.post_format == "rich":
+            return self._publish_rich(text, image_bytes)
         return self._publish_classic(text, image_bytes)
+
+    def _publish_rich(self, text: str, image_bytes: bytes | None) -> PublishResult:
+        """Пост уходит только «Статьёй» — classic как запасной вариант не шлём.
+
+        Если Telegram явно отказал в «Статье» с жирным заголовком, пробуем ещё
+        раз с обычным заголовком: формат сохраняется, пост не теряется.
+        """
+        if not image_bytes:
+            logging.error("TG: в посте нет картинки — «Статья» без неё не отправляется")
+            return self._rich_failure("no image for rich message")
+        text = _truncate_text(text)
+        error_text = None
+        for is_title_bold in (True, False):
+            rich_message = build_rich_message(text, is_title_bold=is_title_bold)
+            if rich_message is None:
+                logging.error("TG: текст не укладывается в rich-сообщение")
+                return self._rich_failure("text does not fit rich message")
+            status, msg_id, error_text = self._send_rich(rich_message, image_bytes)
+            if status == RICH_OK:
+                return PublishResult(
+                    channel=self.name,
+                    ok=True,
+                    post_id=str(msg_id) if msg_id else None,
+                    post_format="rich",
+                )
+            if status == RICH_FAILED:
+                break
+            if is_title_bold:
+                logging.warning("TG: Telegram отказал в «Статье» с жирным заголовком — пробуем без выделения")
+        return self._rich_failure(error_text or "send_rich failed")
+
+    def _rich_failure(self, error_text: str) -> PublishResult:
+        return PublishResult(channel=self.name, ok=False, error=error_text)
 
     def _publish_classic(self, text: str, image_bytes: bytes | None) -> PublishResult:
         # Если есть bytes картинки — сначала отправляем фото, потом текст.

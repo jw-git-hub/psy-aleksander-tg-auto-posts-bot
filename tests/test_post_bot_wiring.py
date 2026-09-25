@@ -20,10 +20,10 @@ def test_build_publishers_passes_post_format():
     assert telegram_of(pubs).post_format == "rich"
 
 
-def test_build_publishers_defaults_to_classic():
+def test_build_publishers_defaults_to_rich():
     pubs = post_bot._build_publishers({"telegram_bot_token": "t", "telegram_chat_id": "c"})
 
-    assert telegram_of(pubs).post_format == "classic"
+    assert telegram_of(pubs).post_format == "rich"
 
 
 def test_post_format_read_from_config_json(bot_config):
@@ -76,3 +76,13 @@ def test_publish_marker_for_run_with_retry_unchanged():
 
     assert 'logging.info(f"Опубликовано: {topic} (цикл {current_cycle})")' in source
     assert "PUBLISH_MARKER='INFO Опубликовано: '" in wrapper
+
+
+def test_articles_without_image_dropped_from_pool():
+    pool = [
+        {"url": "a", "image_url": "https://x/a.jpg"},
+        {"url": "b", "image_url": ""},
+        {"url": "c"},
+    ]
+
+    assert post_bot._drop_articles_without_image(pool) == [pool[0]]
