@@ -197,3 +197,59 @@ def test_record_topic_failure_survives_disk_save_failure(tmp_path, monkeypatch, 
     # Прогон не падает — запись в памяти сделана, диск просто не обновился
     assert TOPIC_A in attempts
     assert "не удалось сохранить" in caplog.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# build_attempt_queue — очередь тем с переходом к следующему циклу
+# ---------------------------------------------------------------------------
+
+def test_queue_current_cycle_fresh_topics_come_first():
+    queue = post_bot.build_attempt_queue([TOPIC_A, TOPIC_B], {}, current_cycle=3)
+
+    assert queue[:2] == [(TOPIC_A, 3), (TOPIC_B, 3)]
+
+
+def test_queue_then_fresh_topics_of_next_cycle_in_plan_order():
+    unposted = [TOPIC_B, TOPIC_D]
+
+    queue = post_bot.build_attempt_queue(unposted, {}, current_cycle=3)
+
+    next_cycle_topics = [topic for topic, cycle in queue if cycle == 4]
+    assert next_cycle_topics == [t for t in post_bot.ALL_TOPICS if t not in unposted]
+    assert queue[2][1] == 4
+
+
+def test_queue_moves_to_next_cycle_when_remaining_current_topics_failed():
+    attempts = {TOPIC_A: "2026-10-01T00:00:00", TOPIC_B: "2026-10-02T00:00:00"}
+
+    queue = post_bot.build_attempt_queue([TOPIC_A, TOPIC_B], attempts, current_cycle=3)
+
+    assert queue[0] == (post_bot.ALL_TOPICS[2], 4)
+
+
+def test_queue_failed_topics_go_last_oldest_first():
+    attempts = {
+        TOPIC_A: "2026-10-05T00:00:00",
+        TOPIC_B: "2026-10-01T00:00:00",
+        TOPIC_C: "2026-10-03T00:00:00",
+    }
+
+    queue = post_bot.build_attempt_queue([TOPIC_A, TOPIC_B], attempts, current_cycle=3)
+
+    assert queue[-3:] == [(TOPIC_B, 3), (TOPIC_C, 4), (TOPIC_A, 3)]
+
+
+def test_queue_has_no_duplicate_topics():
+    attempts = {TOPIC_A: "2026-10-01T00:00:00"}
+
+    queue = post_bot.build_attempt_queue([TOPIC_A, TOPIC_C], attempts, current_cycle=3)
+
+    topics = [topic for topic, _ in queue]
+    assert len(topics) == len(set(topics)) == len(post_bot.ALL_TOPICS)
+
+
+def test_queue_empty_unposted_gives_whole_next_cycle():
+    queue = post_bot.build_attempt_queue([], {}, current_cycle=2)
+
+    assert [topic for topic, _ in queue] == post_bot.ALL_TOPICS
+    assert {cycle for _, cycle in queue} == {3}

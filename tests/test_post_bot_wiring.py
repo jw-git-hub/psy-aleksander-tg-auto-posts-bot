@@ -74,8 +74,16 @@ def test_publish_marker_for_run_with_retry_unchanged():
     source = (REPO_ROOT / "post_bot.py").read_text(encoding="utf-8")
     wrapper = (REPO_ROOT / "run_with_retry.sh").read_text(encoding="utf-8")
 
-    assert 'logging.info(f"Опубликовано: {topic} (цикл {current_cycle})")' in source
+    assert 'logging.info(f"Опубликовано: {topic} (цикл {topic_cycle})")' in source
     assert "PUBLISH_MARKER='INFO Опубликовано: '" in wrapper
+
+
+def test_main_saves_topic_cycle_not_current_cycle():
+    source = (REPO_ROOT / "post_bot.py").read_text(encoding="utf-8")
+
+    assert '"cycle": topic_cycle,' in source
+    assert '"cycle": current_cycle,' not in source
+    assert "if topic_cycle >= 2:" in source
 
 
 def test_articles_without_image_dropped_from_pool():

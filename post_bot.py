@@ -1440,8 +1440,9 @@ def compute_current_cycle(posted: list) -> int:
 #
 # Проблема: узкие темы плана (напр. про развод, роды) стоят в начале списка и
 # на некоторых прогонах подряд не находят статью со score>=7 — они снова
-# оказываются первыми среди unposted[:MAX_TOPIC_ATTEMPTS] и блокируют
-# публикацию. Решение: помнить время последней неудачи по теме и откладывать
+# оказываются первыми среди первых MAX_TOPIC_ATTEMPTS тем очереди и блокируют
+# публикацию (хвост цикла из одних неудачных тем — см. build_attempt_queue,
+# который тогда переходит к темам следующего цикла). Решение: помнить время последней неудачи по теме и откладывать
 # такие темы в конец очереди, но не бросать совсем — при появлении новой
 # статьи в источниках тема снова может выстрелить.
 #
@@ -1501,6 +1502,39 @@ def order_topics_for_attempt(unposted: list[str], attempts: dict[str, str]) -> l
         key=lambda topic: attempts[topic],
     )
     return fresh + failed
+
+
+def build_attempt_queue(
+    unposted: list[str], attempts: dict[str, str], current_cycle: int,
+) -> list[tuple[str, int]]:
+    """Очередь тем на прогон в виде (тема, номер цикла).
+
+    Если в текущем цикле остались только темы без подходящих статей, они не
+    должны блокировать публикацию: к очереди добавляются темы следующего цикла
+    (весь план кроме unposted — в следующем цикле ещё ничего не опубликовано).
+    Порядок: свежие темы текущего цикла, свежие темы следующего, затем все
+    неудачные — от самой давней неудачи к самой свежей.
+    """
+    unposted_set = set(unposted)
+    next_cycle_topics = [topic for topic in ALL_TOPICS if topic not in unposted_set]
+    cycle_of_topic = {topic: current_cycle for topic in unposted}
+    cycle_of_topic.update({topic: current_cycle + 1 for topic in next_cycle_topics})
+    ordered_topics = _fresh_first_by_group(unposted, next_cycle_topics, attempts)
+    return [(topic, cycle_of_topic[topic]) for topic in ordered_topics]
+
+
+def _fresh_first_by_group(
+    current_topics: list[str], next_topics: list[str], attempts: dict[str, str],
+) -> list[str]:
+    """Свежие темы текущего цикла, свежие темы следующего, затем все
+    неудачные по возрастанию времени неудачи."""
+    fresh_current = [t for t in current_topics if t not in attempts]
+    fresh_next = [t for t in next_topics if t not in attempts]
+    failed = sorted(
+        (t for t in current_topics + next_topics if t in attempts),
+        key=lambda topic: attempts[topic],
+    )
+    return fresh_current + fresh_next + failed
 
 
 def _extract_json_array(text: str) -> str | None:
@@ -2835,7 +2869,7 @@ def main():
     # Ротация неудачных тем (topic-attempts.json) — темы, для которых раньше
     # не нашлось статьи, откладываются в конец очереди (см. order_topics_for_attempt)
     topic_attempts = load_topic_attempts()
-    ordered_unposted = order_topics_for_attempt(unposted, topic_attempts)
+    attempt_queue = build_attempt_queue(unposted, topic_attempts, current_cycle)
 
     # Собираем пул кандидатов ОДИН раз для всех попыток
     stats = {"sources_tried": 0, "sources_ok": 0, "articles_found": 0,
@@ -2861,9 +2895,16 @@ def main():
         logging.info(f"Статистика: {stats}")
         return
 
-    # Перебираем темы в порядке ротации (свежие темы плана, затем неудачные
-    # от самой давней неудачи к самой свежей) до MAX_TOPIC_ATTEMPTS
-    topics_to_try = ordered_unposted[:MAX_TOPIC_ATTEMPTS]
+    # Перебираем темы в порядке ротации (свежие темы текущего и следующего
+    # цикла, затем неудачные от самой давней неудачи к самой свежей)
+    # до MAX_TOPIC_ATTEMPTS
+    queue_to_try = attempt_queue[:MAX_TOPIC_ATTEMPTS]
+    topics_to_try = [topic for topic, _ in queue_to_try]
+    if any(cycle > current_cycle for _, cycle in queue_to_try):
+        logging.info(
+            f"В очереди есть темы следующего цикла {current_cycle + 1}: "
+            f"оставшиеся темы цикла {current_cycle} не нашли статей или ждут своей очереди"
+        )
     deferred_topics = [t for t in unposted if t in topic_attempts]
     if deferred_topics:
         logging.info(
@@ -2873,7 +2914,7 @@ def main():
     logging.info(f"Будем пробовать темы (до {MAX_TOPIC_ATTEMPTS}): "
                  + " | ".join(t[:40] for t in topics_to_try))
 
-    for topic in topics_to_try:
+    for topic, topic_cycle in queue_to_try:
         # Глобальный лимит L4 коллизий за запуск
         if stats["text_collisions"] >= MAX_TEXT_COLLISIONS_PER_RUN:
             logging.error(
@@ -2941,7 +2982,7 @@ def main():
 
         # Собираем excerpts прошлых постов по этой теме для cycle>=2
         previous_excerpts: list[str] | None = None
-        if current_cycle >= 2:
+        if topic_cycle >= 2:
             previous_excerpts = [
                 p.get("text_excerpt", "")
                 for p in posted
@@ -3000,10 +3041,10 @@ def main():
         if dry_run:
             logging.info(
                 f"DRY-RUN: симулируем публикацию для темы «{topic}» "
-                f"(цикл {current_cycle}, текст {len(rewritten)} симв.)"
+                f"(цикл {topic_cycle}, текст {len(rewritten)} симв.)"
             )
             logging.info(
-                f"DRY-RUN: would save with cycle={current_cycle}, "
+                f"DRY-RUN: would save with cycle={topic_cycle}, "
                 f"text_hash={text_hash_to_save[:16]}..., "
                 f"text_excerpt={text_excerpt_to_save[:80]}..."
             )
@@ -3036,7 +3077,7 @@ def main():
                 "topic": topic,
                 "fingerprint": sorted(entity_fingerprint(article.get("body", ""))),
                 "published_at": datetime.now().isoformat(),
-                "cycle": current_cycle,
+                "cycle": topic_cycle,
                 "text_hash": text_hash_to_save,
                 "text_minhash": text_minhash_to_save,
                 "text_excerpt": text_excerpt_to_save,
@@ -3049,7 +3090,12 @@ def main():
             except Exception as e:
                 logging.error(f"КРИТИЧНО: пост отправлен, но не сохранён в posted-topics.json: {e}")
             record_topic_success(topic_attempts, topic, dry_run)
-            logging.info(f"Опубликовано: {topic} (цикл {current_cycle})")
+            if topic_cycle > current_cycle:
+                logging.info(
+                    f"Тема следующего цикла {topic_cycle} опубликована при незакрытом "
+                    f"цикле {current_cycle}: остаток цикла {current_cycle} отложен"
+                )
+            logging.info(f"Опубликовано: {topic} (цикл {topic_cycle})")
             logging.info(f"Статистика: {stats}")
             return  # Один пост за запуск
         else:
